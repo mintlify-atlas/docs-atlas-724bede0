@@ -1,0 +1,661 @@
+---
+title: "Backend API"
+description: "Hardware backend abstraction for executing computation graphs"
+---
+
+The backend API provides a hardware-agnostic abstraction for executing GGML computation graphs. Backends represent specific hardware devices (CPU, GPU, etc.) and manage memory buffers, tensor data transfer, and graph execution.
+
+## Type definitions
+
+```c
+typedef struct ggml_backend_buffer_type * ggml_backend_buffer_type_t;
+typedef struct ggml_backend_buffer      * ggml_backend_buffer_t;
+typedef struct ggml_backend_event       * ggml_backend_event_t;
+typedef struct ggml_backend             * ggml_backend_t;
+typedef void                            * ggml_backend_graph_plan_t;
+typedef struct ggml_backend_reg         * ggml_backend_reg_t;
+typedef struct ggml_backend_device      * ggml_backend_dev_t;
+```
+
+## Buffer usage enum
+
+```c
+enum ggml_backend_buffer_usage {
+    GGML_BACKEND_BUFFER_USAGE_ANY     = 0,
+    GGML_BACKEND_BUFFER_USAGE_WEIGHTS = 1,
+    GGML_BACKEND_BUFFER_USAGE_COMPUTE = 2,
+};
+```
+
+| Value | Description |
+|---|---|
+| `GGML_BACKEND_BUFFER_USAGE_ANY` | General-purpose buffer with no special semantics |
+| `GGML_BACKEND_BUFFER_USAGE_WEIGHTS` | Buffer holds model weights; operations on tensors in this buffer are preferably scheduled to the same backend |
+| `GGML_BACKEND_BUFFER_USAGE_COMPUTE` | Buffer used for intermediate computation tensors |
+
+<Tip>
+Set weight buffers to `GGML_BACKEND_BUFFER_USAGE_WEIGHTS` before creating a scheduler. This lets the scheduler co-locate operations with the weights and reduce cross-device copies.
+</Tip>
+
+## Buffer type API
+
+A buffer type (`ggml_backend_buffer_type_t`) describes how a backend allocates and manages memory. You use it to create concrete buffers.
+
+<AccordionGroup>
+  <Accordion title="ggml_backend_buft_name">
+    Returns the human-readable name of a buffer type.
+
+    ```c
+    const char * ggml_backend_buft_name(ggml_backend_buffer_type_t buft);
+    ```
+
+    <ParamField path="buft" type="ggml_backend_buffer_type_t" required>
+      The buffer type to query.
+    </ParamField>
+
+    Returns a null-terminated string. The caller must not free it.
+  </Accordion>
+
+  <Accordion title="ggml_backend_buft_alloc_buffer">
+    Allocates a new backend buffer of the given size.
+
+    ```c
+    ggml_backend_buffer_t ggml_backend_buft_alloc_buffer(
+        ggml_backend_buffer_type_t buft,
+        size_t size);
+    ```
+
+    <ParamField path="buft" type="ggml_backend_buffer_type_t" required>
+      The buffer type that defines where the memory is allocated.
+    </ParamField>
+    <ParamField path="size" type="size_t" required>
+      Size of the buffer in bytes.
+    </ParamField>
+
+    Returns a new buffer, or `NULL` on failure. Free with `ggml_backend_buffer_free`.
+  </Accordion>
+
+  <Accordion title="ggml_backend_buft_get_alignment">
+    Returns the required memory alignment for this buffer type in bytes.
+
+    ```c
+    size_t ggml_backend_buft_get_alignment(ggml_backend_buffer_type_t buft);
+    ```
+
+    <ParamField path="buft" type="ggml_backend_buffer_type_t" required>
+      The buffer type to query.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_backend_buft_is_host">
+    Returns `true` if the buffer type is accessible directly from the host CPU.
+
+    ```c
+    bool ggml_backend_buft_is_host(ggml_backend_buffer_type_t buft);
+    ```
+
+    <ParamField path="buft" type="ggml_backend_buffer_type_t" required>
+      The buffer type to query.
+    </ParamField>
+  </Accordion>
+</AccordionGroup>
+
+## Buffer API
+
+A buffer (`ggml_backend_buffer_t`) is a concrete allocation of device memory. Tensors are assigned into buffers before being used in graph computation.
+
+<AccordionGroup>
+  <Accordion title="ggml_backend_buffer_name">
+    Returns the human-readable name of a buffer.
+
+    ```c
+    const char * ggml_backend_buffer_name(ggml_backend_buffer_t buffer);
+    ```
+
+    <ParamField path="buffer" type="ggml_backend_buffer_t" required>
+      The buffer to query.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_backend_buffer_free">
+    Frees a backend buffer and releases all memory it holds.
+
+    ```c
+    void ggml_backend_buffer_free(ggml_backend_buffer_t buffer);
+    ```
+
+    <ParamField path="buffer" type="ggml_backend_buffer_t" required>
+      The buffer to free. Passing `NULL` is safe.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_backend_buffer_get_base">
+    Returns a raw pointer to the start of the buffer's memory region.
+
+    ```c
+    void * ggml_backend_buffer_get_base(ggml_backend_buffer_t buffer);
+    ```
+
+    <ParamField path="buffer" type="ggml_backend_buffer_t" required>
+      The buffer to query.
+    </ParamField>
+
+    Returns `NULL` for device buffers not directly accessible from the host.
+  </Accordion>
+
+  <Accordion title="ggml_backend_buffer_get_size">
+    Returns the total size of the buffer in bytes.
+
+    ```c
+    size_t ggml_backend_buffer_get_size(ggml_backend_buffer_t buffer);
+    ```
+
+    <ParamField path="buffer" type="ggml_backend_buffer_t" required>
+      The buffer to query.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_backend_buffer_clear">
+    Fills the entire buffer with a constant byte value.
+
+    ```c
+    void ggml_backend_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value);
+    ```
+
+    <ParamField path="buffer" type="ggml_backend_buffer_t" required>
+      The buffer to clear.
+    </ParamField>
+    <ParamField path="value" type="uint8_t" required>
+      The byte value to fill every byte of the buffer with.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_backend_buffer_is_host">
+    Returns `true` if the buffer is in host-accessible memory.
+
+    ```c
+    bool ggml_backend_buffer_is_host(ggml_backend_buffer_t buffer);
+    ```
+
+    <ParamField path="buffer" type="ggml_backend_buffer_t" required>
+      The buffer to query.
+    </ParamField>
+  </Accordion>
+</AccordionGroup>
+
+## Backend (stream) API
+
+A backend (`ggml_backend_t`) represents a compute stream on a device. Most programs create one backend per device and use it throughout the session.
+
+<AccordionGroup>
+  <Accordion title="ggml_backend_guid">
+    Returns a globally unique identifier for the backend instance.
+
+    ```c
+    ggml_guid_t ggml_backend_guid(ggml_backend_t backend);
+    ```
+
+    <ParamField path="backend" type="ggml_backend_t" required>
+      The backend to query.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_backend_name">
+    Returns the human-readable name of the backend.
+
+    ```c
+    const char * ggml_backend_name(ggml_backend_t backend);
+    ```
+
+    <ParamField path="backend" type="ggml_backend_t" required>
+      The backend to query.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_backend_free">
+    Destroys the backend and releases its resources.
+
+    ```c
+    void ggml_backend_free(ggml_backend_t backend);
+    ```
+
+    <ParamField path="backend" type="ggml_backend_t" required>
+      The backend to free.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_backend_get_default_buffer_type">
+    Returns the default buffer type for this backend. Use this type when allocating buffers without a specific device preference.
+
+    ```c
+    ggml_backend_buffer_type_t ggml_backend_get_default_buffer_type(
+        ggml_backend_t backend);
+    ```
+
+    <ParamField path="backend" type="ggml_backend_t" required>
+      The backend to query.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_backend_alloc_buffer">
+    Allocates a buffer of the given size using the backend's default buffer type.
+
+    ```c
+    ggml_backend_buffer_t ggml_backend_alloc_buffer(
+        ggml_backend_t backend,
+        size_t         size);
+    ```
+
+    <ParamField path="backend" type="ggml_backend_t" required>
+      The backend that owns the allocation.
+    </ParamField>
+    <ParamField path="size" type="size_t" required>
+      Size in bytes.
+    </ParamField>
+
+    Equivalent to calling `ggml_backend_buft_alloc_buffer` with `ggml_backend_get_default_buffer_type(backend)`.
+  </Accordion>
+</AccordionGroup>
+
+## Tensor operations
+
+<AccordionGroup>
+  <Accordion title="ggml_backend_tensor_set">
+    Copies data from a host buffer into a tensor (synchronous).
+
+    ```c
+    void ggml_backend_tensor_set(
+        struct ggml_tensor * tensor,
+        const void         * data,
+        size_t               offset,
+        size_t               size);
+    ```
+
+    <ParamField path="tensor" type="struct ggml_tensor *" required>
+      Destination tensor.
+    </ParamField>
+    <ParamField path="data" type="const void *" required>
+      Source data in host memory.
+    </ParamField>
+    <ParamField path="offset" type="size_t" required>
+      Byte offset into `tensor->data` at which to start writing.
+    </ParamField>
+    <ParamField path="size" type="size_t" required>
+      Number of bytes to copy.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_backend_tensor_get">
+    Copies data from a tensor into a host buffer (synchronous).
+
+    ```c
+    void ggml_backend_tensor_get(
+        const struct ggml_tensor * tensor,
+        void                     * data,
+        size_t                     offset,
+        size_t                     size);
+    ```
+
+    <ParamField path="tensor" type="const struct ggml_tensor *" required>
+      Source tensor.
+    </ParamField>
+    <ParamField path="data" type="void *" required>
+      Destination buffer in host memory.
+    </ParamField>
+    <ParamField path="offset" type="size_t" required>
+      Byte offset into `tensor->data` at which to start reading.
+    </ParamField>
+    <ParamField path="size" type="size_t" required>
+      Number of bytes to copy.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_backend_tensor_copy">
+    Copies tensor data between two backends. Either or both may be device backends.
+
+    ```c
+    void ggml_backend_tensor_copy(
+        struct ggml_tensor * src,
+        struct ggml_tensor * dst);
+    ```
+
+    <ParamField path="src" type="struct ggml_tensor *" required>
+      Source tensor (can reside on any backend).
+    </ParamField>
+    <ParamField path="dst" type="struct ggml_tensor *" required>
+      Destination tensor (can reside on any backend).
+    </ParamField>
+
+    The source and destination shapes and types must match.
+  </Accordion>
+</AccordionGroup>
+
+## Graph computation
+
+<AccordionGroup>
+  <Accordion title="ggml_backend_graph_plan_create">
+    Creates a reusable execution plan for a computation graph. Plans can be executed multiple times without re-analyzing the graph structure.
+
+    ```c
+    ggml_backend_graph_plan_t ggml_backend_graph_plan_create(
+        ggml_backend_t       backend,
+        struct ggml_cgraph * cgraph);
+    ```
+
+    <ParamField path="backend" type="ggml_backend_t" required>
+      The backend that will execute the plan.
+    </ParamField>
+    <ParamField path="cgraph" type="struct ggml_cgraph *" required>
+      The computation graph to plan.
+    </ParamField>
+
+    Free the plan with `ggml_backend_graph_plan_free` when done.
+  </Accordion>
+
+  <Accordion title="ggml_backend_graph_plan_compute">
+    Executes a previously created graph plan.
+
+    ```c
+    enum ggml_status ggml_backend_graph_plan_compute(
+        ggml_backend_t            backend,
+        ggml_backend_graph_plan_t plan);
+    ```
+
+    <ParamField path="backend" type="ggml_backend_t" required>
+      The backend that owns the plan.
+    </ParamField>
+    <ParamField path="plan" type="ggml_backend_graph_plan_t" required>
+      The plan to execute.
+    </ParamField>
+
+    Returns `GGML_STATUS_SUCCESS` on success.
+  </Accordion>
+
+  <Accordion title="ggml_backend_graph_compute">
+    Executes a computation graph directly, without a pre-created plan.
+
+    ```c
+    enum ggml_status ggml_backend_graph_compute(
+        ggml_backend_t       backend,
+        struct ggml_cgraph * cgraph);
+    ```
+
+    <ParamField path="backend" type="ggml_backend_t" required>
+      The backend to run the graph on.
+    </ParamField>
+    <ParamField path="cgraph" type="struct ggml_cgraph *" required>
+      The computation graph to execute.
+    </ParamField>
+
+    Returns `GGML_STATUS_SUCCESS` on success. For repeated execution of the same graph topology, prefer creating a plan with `ggml_backend_graph_plan_create`.
+  </Accordion>
+</AccordionGroup>
+
+## Synchronization
+
+<AccordionGroup>
+  <Accordion title="ggml_backend_event_new">
+    Creates a new synchronization event on the given device.
+
+    ```c
+    ggml_backend_event_t ggml_backend_event_new(ggml_backend_dev_t device);
+    ```
+
+    <ParamField path="device" type="ggml_backend_dev_t" required>
+      The device that will record and wait on the event.
+    </ParamField>
+
+    Free with `ggml_backend_event_free`.
+  </Accordion>
+
+  <Accordion title="ggml_backend_event_free">
+    Destroys a synchronization event.
+
+    ```c
+    void ggml_backend_event_free(ggml_backend_event_t event);
+    ```
+
+    <ParamField path="event" type="ggml_backend_event_t" required>
+      The event to destroy.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_backend_event_synchronize">
+    Blocks the calling thread until the event has been recorded and all preceding operations on its backend have completed.
+
+    ```c
+    void ggml_backend_event_synchronize(ggml_backend_event_t event);
+    ```
+
+    <ParamField path="event" type="ggml_backend_event_t" required>
+      The event to wait on.
+    </ParamField>
+  </Accordion>
+</AccordionGroup>
+
+## Device API
+
+A device (`ggml_backend_dev_t`) represents a physical or logical hardware unit. Multiple backend streams can be created from a single device.
+
+### Device type enum
+
+```c
+enum ggml_backend_dev_type {
+    GGML_BACKEND_DEVICE_TYPE_CPU,   // CPU device using system memory
+    GGML_BACKEND_DEVICE_TYPE_GPU,   // GPU device using dedicated memory
+    GGML_BACKEND_DEVICE_TYPE_IGPU,  // integrated GPU using host memory
+    GGML_BACKEND_DEVICE_TYPE_ACCEL, // accelerator (e.g. BLAS, AMX)
+};
+```
+
+<AccordionGroup>
+  <Accordion title="ggml_backend_dev_name">
+    Returns the short name of the device (e.g. `"CUDA0"`).
+
+    ```c
+    const char * ggml_backend_dev_name(ggml_backend_dev_t device);
+    ```
+
+    <ParamField path="device" type="ggml_backend_dev_t" required>
+      The device to query.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_backend_dev_description">
+    Returns a longer human-readable description of the device (e.g. `"NVIDIA GeForce RTX 4090"`).
+
+    ```c
+    const char * ggml_backend_dev_description(ggml_backend_dev_t device);
+    ```
+
+    <ParamField path="device" type="ggml_backend_dev_t" required>
+      The device to query.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_backend_dev_memory">
+    Queries free and total memory available on the device.
+
+    ```c
+    void ggml_backend_dev_memory(
+        ggml_backend_dev_t device,
+        size_t           * free,
+        size_t           * total);
+    ```
+
+    <ParamField path="device" type="ggml_backend_dev_t" required>
+      The device to query.
+    </ParamField>
+    <ParamField path="free" type="size_t *" required>
+      Output: free memory in bytes.
+    </ParamField>
+    <ParamField path="total" type="size_t *" required>
+      Output: total memory in bytes.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_backend_dev_type">
+    Returns the type of the device.
+
+    ```c
+    enum ggml_backend_dev_type ggml_backend_dev_type(ggml_backend_dev_t device);
+    ```
+
+    <ParamField path="device" type="ggml_backend_dev_t" required>
+      The device to query.
+    </ParamField>
+  </Accordion>
+</AccordionGroup>
+
+## Backend scheduler
+
+The scheduler (`ggml_backend_sched_t`) enables transparent multi-device execution. It partitions the computation graph, assigns operations to the most suitable backend, and handles buffer allocation and inter-device tensor copies automatically.
+
+```c
+typedef struct ggml_backend_sched * ggml_backend_sched_t;
+```
+
+<Note>
+Backends with a lower index in the array passed to `ggml_backend_sched_new` have higher scheduling priority.
+</Note>
+
+### Example usage
+
+```c
+// Mark weight buffers so the scheduler prefers to run ops on the same backend
+ggml_backend_buffer_set_usage(buf_weights, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+
+// Create a scheduler with GPU first, CPU as fallback
+ggml_backend_t backends[]   = { backend_gpu, backend_cpu };
+ggml_backend_sched_t sched  = ggml_backend_sched_new(
+    backends, NULL, 2, GGML_DEFAULT_GRAPH_SIZE, false, true);
+
+// Reserve buffers using a worst-case graph (optional but recommended)
+ggml_backend_sched_reserve(sched, build_graph(sched, max_batch));
+
+// Run the graph — allocation happens automatically on first call
+struct ggml_cgraph * graph = build_graph(sched);
+for (int i = 0; i < 10; ++i) {
+    ggml_backend_sched_graph_compute(sched, graph);
+}
+
+ggml_backend_sched_free(sched);
+```
+
+<AccordionGroup>
+  <Accordion title="ggml_backend_sched_new">
+    Creates a new backend scheduler.
+
+    ```c
+    ggml_backend_sched_t ggml_backend_sched_new(
+        ggml_backend_t             * backends,
+        ggml_backend_buffer_type_t * bufts,
+        int                          n_backends,
+        size_t                       graph_size,
+        bool                         parallel,
+        bool                         op_offload);
+    ```
+
+    <ParamField path="backends" type="ggml_backend_t *" required>
+      Array of backends to use. Index 0 has the highest priority.
+    </ParamField>
+    <ParamField path="bufts" type="ggml_backend_buffer_type_t *">
+      Optional array of buffer types (one per backend). Pass `NULL` to use each backend's default buffer type.
+    </ParamField>
+    <ParamField path="n_backends" type="int" required>
+      Number of backends in the array.
+    </ParamField>
+    <ParamField path="graph_size" type="size_t" required>
+      Maximum number of nodes expected in a computation graph. Use `GGML_DEFAULT_GRAPH_SIZE` if unsure.
+    </ParamField>
+    <ParamField path="parallel" type="bool" required>
+      Whether to allow concurrent execution across backends.
+    </ParamField>
+    <ParamField path="op_offload" type="bool" required>
+      Whether to offload supported operations to non-CPU backends automatically.
+    </ParamField>
+
+    Free with `ggml_backend_sched_free`.
+  </Accordion>
+
+  <Accordion title="ggml_backend_sched_graph_compute">
+    Allocates (if needed) and executes the computation graph across all scheduled backends.
+
+    ```c
+    enum ggml_status ggml_backend_sched_graph_compute(
+        ggml_backend_sched_t sched,
+        struct ggml_cgraph * graph);
+    ```
+
+    <ParamField path="sched" type="ggml_backend_sched_t" required>
+      The scheduler.
+    </ParamField>
+    <ParamField path="graph" type="struct ggml_cgraph *" required>
+      The computation graph to execute.
+    </ParamField>
+
+    Returns `GGML_STATUS_SUCCESS` on success. On the first call, buffers are allocated automatically.
+  </Accordion>
+
+  <Accordion title="ggml_backend_sched_free">
+    Destroys the scheduler and releases all associated resources.
+
+    ```c
+    void ggml_backend_sched_free(ggml_backend_sched_t sched);
+    ```
+
+    <ParamField path="sched" type="ggml_backend_sched_t" required>
+      The scheduler to free.
+    </ParamField>
+  </Accordion>
+</AccordionGroup>
+
+## Backend registry
+
+The registry tracks all loaded backends and their devices. Use these functions to enumerate available hardware and load dynamic backend plugins.
+
+<AccordionGroup>
+  <Accordion title="ggml_backend_load">
+    Loads a backend from a dynamic library file and registers it.
+
+    ```c
+    ggml_backend_reg_t ggml_backend_load(const char * path);
+    ```
+
+    <ParamField path="path" type="const char *" required>
+      File system path to the shared library (e.g. `"libggml-cuda.so"`).
+    </ParamField>
+
+    Returns the registration handle, or `NULL` on failure. Unload with `ggml_backend_unload`.
+  </Accordion>
+
+  <Accordion title="ggml_backend_load_all">
+    Discovers and loads all known backend shared libraries from the default search path.
+
+    ```c
+    void ggml_backend_load_all(void);
+    ```
+
+    Call this once at startup if you want automatic hardware discovery without manually specifying backend paths.
+  </Accordion>
+
+  <Accordion title="ggml_backend_dev_count">
+    Returns the total number of registered devices across all loaded backends.
+
+    ```c
+    size_t ggml_backend_dev_count(void);
+    ```
+  </Accordion>
+
+  <Accordion title="ggml_backend_dev_get">
+    Returns the device at the given index in the global device list.
+
+    ```c
+    ggml_backend_dev_t ggml_backend_dev_get(size_t index);
+    ```
+
+    <ParamField path="index" type="size_t" required>
+      Zero-based device index. Must be less than `ggml_backend_dev_count()`.
+    </ParamField>
+  </Accordion>
+</AccordionGroup>

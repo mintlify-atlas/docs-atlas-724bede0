@@ -1,0 +1,168 @@
+---
+title: "Building ggml"
+description: "Compile ggml with different backends and options."
+---
+
+## Prerequisites
+
+- **CMake** 3.14 or later
+- A C11 / C++17 compiler: GCC, Clang, or MSVC
+- **Git**
+
+Backend-specific requirements are listed in the relevant sections below.
+
+## Basic build
+
+```bash
+git clone https://github.com/ggml-org/ggml
+cd ggml
+mkdir build && cd build
+cmake ..
+cmake --build . --config Release -j 8
+```
+
+This produces the core `ggml` library and all examples in `build/bin/`. The
+default build targets the CPU backend with native ISA optimizations enabled.
+
+## Backend builds
+
+<Tabs>
+  <Tab title="CUDA">
+    <Note>
+      Requires the NVIDIA CUDA Toolkit (tested with CUDA 11.x and 12.x) and a
+      compatible NVIDIA GPU. Ensure `nvcc` is on your `PATH`.
+    </Note>
+
+    ```bash
+    cmake .. -DGGML_CUDA=ON
+    cmake --build . --config Release -j 8
+    ```
+
+    Additional CUDA options:
+
+    | Flag | Default | Description |
+    |---|---|---|
+    | `GGML_CUDA_FORCE_MMQ` | `OFF` | Use MMQ kernels instead of cuBLAS |
+    | `GGML_CUDA_FORCE_CUBLAS` | `OFF` | Always use cuBLAS instead of MMQ kernels |
+    | `GGML_CUDA_FA` | `ON` | Compile FlashAttention CUDA kernels |
+    | `GGML_CUDA_GRAPHS` | `OFF` | Enable CUDA graph capture (llama.cpp) |
+    | `GGML_CUDA_NO_VMM` | `OFF` | Disable CUDA virtual memory management |
+
+    ```bash
+    # Example: CUDA with cuBLAS forced on and FlashAttention for all quants
+    cmake .. -DGGML_CUDA=ON \
+             -DGGML_CUDA_FORCE_CUBLAS=ON \
+             -DGGML_CUDA_FA_ALL_QUANTS=ON
+    ```
+  </Tab>
+
+  <Tab title="Metal">
+    <Note>
+      Metal is enabled by default on Apple platforms. macOS 12.3 or later is
+      recommended. The build requires Xcode Command Line Tools.
+    </Note>
+
+    ```bash
+    cmake .. -DGGML_METAL=ON
+    cmake --build . --config Release -j 8
+    ```
+
+    By default the Metal shader library is embedded into the binary
+    (`GGML_METAL_EMBED_LIBRARY=ON`). To disable embedding:
+
+    ```bash
+    cmake .. -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=OFF
+    ```
+
+    Additional Metal options:
+
+    | Flag | Default | Description |
+    |---|---|---|
+    | `GGML_METAL_NDEBUG` | `OFF` | Disable Metal debugging |
+    | `GGML_METAL_SHADER_DEBUG` | `OFF` | Compile Metal with `-fno-fast-math` |
+    | `GGML_METAL_MACOSX_VERSION_MIN` | `` | Minimum macOS deployment target |
+  </Tab>
+
+  <Tab title="Vulkan">
+    <Warning>
+      Vulkan support requires the [Vulkan SDK](https://vulkan.lunarg.com/)
+      to be installed and `VULKAN_SDK` to be set in your environment.
+    </Warning>
+
+    ```bash
+    cmake .. -DGGML_VULKAN=ON
+    cmake --build . --config Release -j 8
+    ```
+
+    Additional Vulkan options:
+
+    | Flag | Default | Description |
+    |---|---|---|
+    | `GGML_VULKAN_CHECK_RESULTS` | `OFF` | Run op correctness checks |
+    | `GGML_VULKAN_DEBUG` | `OFF` | Enable Vulkan debug output |
+    | `GGML_VULKAN_VALIDATE` | `OFF` | Enable Vulkan validation layers |
+    | `GGML_VULKAN_MEMORY_DEBUG` | `OFF` | Enable memory debug output |
+  </Tab>
+
+  <Tab title="HIP (AMD)">
+    <Warning>
+      Requires ROCm 5.x or later. Set `CMAKE_PREFIX_PATH` or
+      `ROCM_PATH` to your ROCm installation directory before configuring.
+    </Warning>
+
+    ```bash
+    cmake .. -DGGML_HIP=ON
+    cmake --build . --config Release -j 8
+    ```
+
+    Additional HIP options:
+
+    | Flag | Default | Description |
+    |---|---|---|
+    | `GGML_HIP_GRAPHS` | `OFF` | Enable HIP graph capture (experimental) |
+    | `GGML_HIP_ROCWMMA_FATTN` | `OFF` | Enable rocWMMA for FlashAttention |
+    | `GGML_HIP_MMQ_MFMA` | `ON` | Enable MFMA MMA for CDNA in MMQ |
+  </Tab>
+</Tabs>
+
+## General CMake options
+
+These options apply to all build configurations.
+
+| Flag | Default | Description |
+|---|---|---|
+| `GGML_STATIC` | `OFF` | Static link libraries |
+| `GGML_NATIVE` | `ON` | Optimize for the host CPU (enables AVX2, etc.) |
+| `GGML_LTO` | `OFF` | Enable link-time optimization |
+| `GGML_CCACHE` | `ON` | Use ccache if available |
+| `GGML_BACKEND_DL` | `OFF` | Build backends as dynamic libraries |
+| `BUILD_SHARED_LIBS` | `ON` | Build shared instead of static libraries |
+| `GGML_OPENMP` | `ON` | Use OpenMP for CPU multi-threading |
+
+## CPU instruction set options
+
+<Note>
+  When `GGML_NATIVE=ON` (the default), the compiler detects and enables all
+  supported ISA extensions automatically. Set individual flags only when
+  cross-compiling or targeting a specific baseline.
+</Note>
+
+| Flag | Description |
+|---|---|
+| `GGML_AVX` | Enable AVX |
+| `GGML_AVX2` | Enable AVX2 |
+| `GGML_AVX512` | Enable AVX-512F |
+| `GGML_FMA` | Enable FMA |
+| `GGML_F16C` | Enable F16C |
+| `GGML_SSE42` | Enable SSE 4.2 |
+| `GGML_BMI2` | Enable BMI2 |
+
+Example — build for a fixed AVX2 baseline without native detection:
+
+```bash
+cmake .. -DGGML_NATIVE=OFF \
+         -DGGML_AVX=ON \
+         -DGGML_AVX2=ON \
+         -DGGML_FMA=ON \
+         -DGGML_F16C=ON
+```

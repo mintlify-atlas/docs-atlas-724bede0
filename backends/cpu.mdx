@@ -1,0 +1,179 @@
+---
+title: "CPU backend"
+description: "Thread-parallel, SIMD-accelerated CPU execution — the default backend, always available"
+---
+
+The CPU backend is ggml's built-in execution target. It requires no external dependencies, works on every supported platform, and is always available as a fallback when no GPU backend is present.
+
+## Initialization
+
+```c
+#include "ggml-cpu.h"
+
+ggml_backend_t backend = ggml_backend_cpu_init();
+if (!backend) {
+    fprintf(stderr, "failed to initialize CPU backend\n");
+    return 1;
+}
+```
+
+You can also use the generic backend selector, which returns the CPU backend when no GPU is found:
+
+```c
+// Returns the best GPU, or CPU if none is available
+ggml_backend_t backend = ggml_backend_init_best();
+
+// Always returns the CPU backend
+ggml_backend_t cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
+```
+
+<Note>
+  Call `ggml_backend_load_all()` before using `ggml_backend_init_best()` or `ggml_backend_init_by_type()` so that all compiled-in backends are registered.
+</Note>
+
+## Thread configuration
+
+The CPU backend parallelises operations across threads. You control the thread count after initialization:
+
+```c
+// Set the number of threads for graph compute
+ggml_backend_cpu_set_n_threads(backend, 8);
+```
+
+### Custom thread pool
+
+For finer control — including thread affinity and NUMA-awareness — create a `ggml_threadpool` and attach it:
+
+```c
+#include "ggml-cpu.h"
+
+struct ggml_threadpool_params tp_params = ggml_threadpool_params_default(8);
+struct ggml_threadpool * pool = ggml_threadpool_new(&tp_params);
+
+ggml_backend_cpu_set_threadpool(backend, pool);
+
+// When done:
+ggml_threadpool_free(pool);
+```
+
+Thread pool management functions:
+
+| Function | Description |
+|----------|-------------|
+| `ggml_threadpool_new(params)` | Create a thread pool with the given parameters |
+| `ggml_threadpool_free(pool)` | Destroy the thread pool |
+| `ggml_threadpool_get_n_threads(pool)` | Query the thread count |
+| `ggml_threadpool_pause(pool)` | Suspend worker threads |
+| `ggml_threadpool_resume(pool)` | Resume suspended threads |
+
+### NUMA support
+
+On systems with multiple NUMA nodes, initialise ggml's NUMA support before creating backends:
+
+```c
+// Choose a strategy appropriate for your system
+ggml_numa_init(GGML_NUMA_STRATEGY_DISTRIBUTE);
+```
+
+| Strategy | Description |
+|----------|-------------|
+| `GGML_NUMA_STRATEGY_DISABLED` | No NUMA awareness (default) |
+| `GGML_NUMA_STRATEGY_DISTRIBUTE` | Distribute threads across nodes |
+| `GGML_NUMA_STRATEGY_ISOLATE` | Pin all threads to one node |
+| `GGML_NUMA_STRATEGY_NUMACTL` | Honour `numactl` binding from the shell |
+| `GGML_NUMA_STRATEGY_MIRROR` | Mirror allocation across nodes |
+
+## SIMD optimisations
+
+ggml detects CPU features at runtime and selects the most capable implementation for each operation. You can query which extensions are available:
+
+<Tabs>
+  <Tab title="x86">
+    ```c
+    // Returns 1 if the CPU supports the extension, 0 otherwise
+    ggml_cpu_has_avx()        // AVX
+    ggml_cpu_has_avx2()       // AVX2
+    ggml_cpu_has_avx512()     // AVX-512F
+    ggml_cpu_has_avx512_vnni()// AVX-512 VNNI
+    ggml_cpu_has_avx512_bf16()// AVX-512 BF16
+    ggml_cpu_has_avx_vnni()   // AVX-VNNI
+    ggml_cpu_has_fma()        // FMA3
+    ggml_cpu_has_f16c()       // F16C (CVT16)
+    ggml_cpu_has_amx_int8()   // Intel AMX INT8
+    ggml_cpu_has_bmi2()       // BMI2
+    ```
+  </Tab>
+  <Tab title="ARM">
+    ```c
+    ggml_cpu_has_neon()       // NEON SIMD
+    ggml_cpu_has_arm_fma()    // ARM FMA
+    ggml_cpu_has_dotprod()    // SDOT/UDOT dot-product
+    ggml_cpu_has_matmul_int8()// SMMLA/UMMLA int8 matmul
+    ggml_cpu_has_sve()        // Scalable Vector Extension
+    ggml_cpu_get_sve_cnt()    // SVE vector length in bytes
+    ggml_cpu_has_sme()        // Scalable Matrix Extension
+    ggml_cpu_has_fp16_va()    // FP16 vector arithmetic
+    ```
+  </Tab>
+  <Tab title="Other">
+    ```c
+    ggml_cpu_has_riscv_v()    // RISC-V Vector Extension
+    ggml_cpu_get_rvv_vlen()   // RVV vector length in bytes
+    ggml_cpu_has_vsx()        // PowerPC VSX
+    ggml_cpu_has_vxe()        // IBM z Vector Extensions
+    ggml_cpu_has_wasm_simd()  // WebAssembly SIMD
+    ```
+  </Tab>
+</Tabs>
+
+<Tip>
+  You do not need to call these functions to get SIMD acceleration — ggml selects the best path automatically. Use them only if you need to log or assert specific capabilities.
+</Tip>
+
+## Abort callback
+
+You can register a callback that the CPU backend will call periodically during graph compute. Return `true` to abort execution:
+
+```c
+bool my_abort(void * data) {
+    return should_cancel; // return true to stop computation
+}
+
+ggml_backend_cpu_set_abort_callback(backend, my_abort, NULL);
+```
+
+## Reference implementations
+
+For debugging or correctness testing, force the backend to use unoptimised scalar code:
+
+```c
+ggml_backend_cpu_set_use_ref(backend, true);
+```
+
+## Build configuration
+
+The CPU backend is compiled into ggml unconditionally. No additional CMake flags are required. SIMD paths are enabled automatically when the target compiler supports them.
+
+```bash
+cmake -B build
+cmake --build build
+```
+
+To target a specific architecture on x86:
+
+```cmake
+# Enable AVX2 and FMA explicitly
+target_compile_options(ggml PRIVATE -mavx2 -mfma)
+```
+
+## API summary
+
+| Function | Description |
+|----------|-------------|
+| `ggml_backend_cpu_init()` | Create a CPU backend instance |
+| `ggml_backend_is_cpu(backend)` | Check whether a backend is the CPU backend |
+| `ggml_backend_cpu_set_n_threads(backend, n)` | Set the thread count |
+| `ggml_backend_cpu_set_threadpool(backend, pool)` | Attach a custom thread pool |
+| `ggml_backend_cpu_set_abort_callback(backend, cb, data)` | Register an abort callback |
+| `ggml_backend_cpu_set_use_ref(backend, use_ref)` | Force reference (scalar) implementations |
+| `ggml_backend_cpu_reg()` | Return the CPU backend registry entry |

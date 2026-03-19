@@ -1,0 +1,199 @@
+---
+title: "Datasets"
+description: "Manage training data with ggml's dataset API"
+---
+
+The `ggml_opt_dataset_t` type manages training data inside ggml. It stores all samples in two flat tensors — one for inputs and one for labels — and provides shuffling and batching operations that feed the optimizer.
+
+## Initializing a dataset
+
+```c
+ggml_opt_dataset_t ggml_opt_dataset_init(
+    enum ggml_type type_data,    // element type for the data tensor
+    enum ggml_type type_label,   // element type for the labels tensor
+    int64_t        ne_datapoint, // number of elements per datapoint
+    int64_t        ne_label,     // number of elements per label
+    int64_t        ndata,        // total number of datapoints
+    int64_t        ndata_shard); // shuffle granularity
+```
+
+| Parameter | Description |
+|---|---|
+| `type_data` | Element type for the data tensor (e.g. `GGML_TYPE_F32`). |
+| `type_label` | Element type for the labels tensor. |
+| `ne_datapoint` | Number of scalar elements in a single datapoint. For a 28×28 image, this is `784`. |
+| `ne_label` | Number of scalar elements in a single label. For one-hot class labels with 10 classes, this is `10`. |
+| `ndata` | Total number of datapoints (and labels) stored in the dataset. |
+| `ndata_shard` | Number of consecutive datapoints treated as an atomic unit during shuffling. See [Shard size](#shard-size) below. |
+
+Free the dataset when you are done:
+
+```c
+void ggml_opt_dataset_free(ggml_opt_dataset_t dataset);
+```
+
+## Accessing the underlying tensors
+
+After calling `ggml_opt_dataset_init`, retrieve the raw tensors and populate them with your training data:
+
+```c
+// shape: [ne_datapoint, ndata]
+struct ggml_tensor * data   = ggml_opt_dataset_data  (dataset);
+
+// shape: [ne_label, ndata]
+struct ggml_tensor * labels = ggml_opt_dataset_labels(dataset);
+
+// Total number of datapoints
+int64_t ndata = ggml_opt_dataset_ndata(dataset);
+```
+
+Both tensors are stored contiguously. Copy your training samples into them using `memcpy` or any ggml tensor-write helper:
+
+```c
+// Example: populate a float dataset from a raw buffer
+float * data_ptr = (float *) data->data;
+memcpy(data_ptr, my_images, ndata * ne_datapoint * sizeof(float));
+
+float * label_ptr = (float *) labels->data;
+memcpy(label_ptr, my_labels, ndata * ne_label * sizeof(float));
+```
+
+## Shard size
+
+The `ndata_shard` parameter controls the granularity of dataset shuffling. Instead of shuffling individual datapoints, the optimizer shuffles *shards* — contiguous groups of `ndata_shard` datapoints that are always moved together.
+
+- **`ndata_shard = 1`** — maximum randomness, each datapoint is shuffled independently. This is correct but has higher overhead when copying data to the device, because each transfer covers only a single sample.
+- **`ndata_shard > 1`** — shards are shuffled as blocks. This reduces the number of individual memory operations at the cost of slightly less randomization.
+
+<Tip>
+  For small models where data-loading overhead is significant (for example, when using a CUDA backend), a shard size of 8–16 can meaningfully reduce training time with negligible impact on convergence. The MNIST example uses `ndata_shard = 10` for this reason.
+</Tip>
+
+## Shuffling
+
+```c
+void ggml_opt_dataset_shuffle(
+    ggml_opt_context_t opt_ctx,
+    ggml_opt_dataset_t dataset,
+    int64_t            idata);
+```
+
+Shuffles the first `idata` datapoints using the RNG from `opt_ctx`. Pass a negative value to shuffle all datapoints:
+
+```c
+// Shuffle all datapoints before each epoch
+ggml_opt_dataset_shuffle(opt_ctx, dataset, /*idata=*/-1);
+
+// Shuffle only the training split (first idata_split datapoints)
+ggml_opt_dataset_shuffle(opt_ctx, dataset, idata_split);
+```
+
+Shuffling only the training portion (and leaving the validation tail untouched) is the standard pattern used by `ggml_opt_epoch`.
+
+## Retrieving batches
+
+Two functions copy a batch from the dataset into tensors that the optimizer can consume:
+
+```c
+// Copy batch ibatch into device-side tensors (data_batch and labels_batch)
+void ggml_opt_dataset_get_batch(
+    ggml_opt_dataset_t   dataset,
+    struct ggml_tensor * data_batch,   // shape: [ne_datapoint, ndata_batch]
+    struct ggml_tensor * labels_batch, // shape: [ne_label,     ndata_batch]
+    int64_t              ibatch);
+
+// Copy batch ibatch into host memory buffers
+void ggml_opt_dataset_get_batch_host(
+    ggml_opt_dataset_t   dataset,
+    void               * data_batch,
+    size_t               nb_data_batch, // byte size of data_batch buffer
+    void               * labels_batch,
+    int64_t              ibatch);
+```
+
+`ggml_opt_dataset_get_batch` writes into ggml tensors (suitable for passing directly to the optimizer). `ggml_opt_dataset_get_batch_host` writes into raw host-memory buffers, which is useful for inspection or pre-processing outside of ggml.
+
+The batch index `ibatch` is zero-based. The number of available batches is `ndata / ndata_batch` where `ndata_batch` is the second dimension of your `data_batch` tensor.
+
+## Custom training loops
+
+For full control over the training loop — custom logging, mid-epoch checkpointing, or per-batch metric collection — use `ggml_opt_epoch` instead of `ggml_opt_fit`.
+
+```c
+void ggml_opt_epoch(
+    ggml_opt_context_t      opt_ctx,
+    ggml_opt_dataset_t      dataset,
+    ggml_opt_result_t       result_train,   // accumulates training metrics (NULL to skip)
+    ggml_opt_result_t       result_eval,    // accumulates validation metrics (NULL to skip)
+    int64_t                 idata_split,    // index at which training ends and validation begins
+    ggml_opt_epoch_callback callback_train, // called after each training batch
+    ggml_opt_epoch_callback callback_eval); // called after each validation batch
+```
+
+`ggml_opt_epoch` runs one full pass over the dataset: it trains on `dataset[0 .. idata_split)` and evaluates on `dataset[idata_split .. ndata)`. Separate result objects accumulate metrics for each split.
+
+### Epoch callback signature
+
+```c
+typedef void (*ggml_opt_epoch_callback)(
+    bool               train,       // true during training, false during validation
+    ggml_opt_context_t opt_ctx,
+    ggml_opt_dataset_t dataset,
+    ggml_opt_result_t  result,      // result for the current split
+    int64_t            ibatch,      // number of batches evaluated so far
+    int64_t            ibatch_max,  // total batches in this split
+    int64_t            t_start_us); // wall-clock start time in microseconds
+```
+
+The callback is invoked after every batch evaluation. Use `ibatch` and `ibatch_max` to report progress, and `t_start_us` together with the current time to estimate throughput.
+
+### Built-in progress bar callback
+
+```c
+void ggml_opt_epoch_callback_progress_bar(
+    bool               train,
+    ggml_opt_context_t opt_ctx,
+    ggml_opt_dataset_t dataset,
+    ggml_opt_result_t  result,
+    int64_t            ibatch,
+    int64_t            ibatch_max,
+    int64_t            t_start_us);
+```
+
+Pass `ggml_opt_epoch_callback_progress_bar` as the callback to get a formatted progress bar printed to `stderr`:
+
+```c
+ggml_opt_result_t result_train = ggml_opt_result_init();
+ggml_opt_result_t result_eval  = ggml_opt_result_init();
+
+for (int64_t epoch = 0; epoch < nepoch; ++epoch) {
+    // Shuffle training split before each epoch
+    ggml_opt_dataset_shuffle(opt_ctx, dataset, idata_split);
+
+    ggml_opt_result_reset(result_train);
+    ggml_opt_result_reset(result_eval);
+
+    ggml_opt_epoch(
+        opt_ctx,
+        dataset,
+        result_train,
+        result_eval,
+        idata_split,
+        ggml_opt_epoch_callback_progress_bar,  // training callback
+        ggml_opt_epoch_callback_progress_bar); // validation callback
+
+    // Read out metrics after the epoch
+    double loss, loss_unc, accuracy, accuracy_unc;
+    ggml_opt_result_loss    (result_train, &loss,     &loss_unc);
+    ggml_opt_result_accuracy(result_train, &accuracy, &accuracy_unc);
+    fprintf(stderr, "epoch %lld | train loss %.4f ± %.4f | acc %.2f%% ± %.2f%%\n",
+        (long long) epoch, loss, loss_unc, accuracy * 100.0, accuracy_unc * 100.0);
+}
+
+ggml_opt_result_free(result_train);
+ggml_opt_result_free(result_eval);
+```
+
+<Note>
+  You are responsible for calling `ggml_opt_dataset_shuffle` before each epoch when using `ggml_opt_epoch` directly. `ggml_opt_fit` handles shuffling automatically.
+</Note>

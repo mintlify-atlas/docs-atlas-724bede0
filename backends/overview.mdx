@@ -1,0 +1,265 @@
+---
+title: "Backends overview"
+description: "How ggml dispatches computation across hardware"
+---
+
+ggml separates the description of a computation graph from its execution. A **backend** is a pluggable execution target — CPU cores, a CUDA device, Apple Silicon GPU, or a remote machine. You write one graph-building routine and ggml dispatches it to whatever hardware is available.
+
+## Core types
+
+| Type | Description |
+|------|-------------|
+| `ggml_backend_t` | A live execution stream on a specific device |
+| `ggml_backend_buffer_t` | A memory allocation owned by a backend |
+| `ggml_backend_buffer_type_t` | A factory for creating buffers of a specific kind |
+| `ggml_backend_dev_t` | A discoverable hardware device |
+| `ggml_backend_reg_t` | A backend registration entry (groups devices of the same type) |
+| `ggml_backend_sched_t` | A multi-backend scheduler |
+
+### ggml_backend_t
+
+`ggml_backend_t` is an opaque handle to an initialized backend instance. It holds an execution stream and is the primary object you pass to graph compute calls.
+
+```c
+ggml_backend_t backend = ggml_backend_cuda_init(0); // device 0
+// ... run graphs ...
+ggml_backend_free(backend);
+```
+
+### ggml_backend_buffer_t and ggml_backend_buffer_type_t
+
+Buffers hold the raw memory for tensors. A **buffer type** (`ggml_backend_buffer_type_t`) is a descriptor that tells ggml where and how to allocate memory. You get one from a backend and use it to allocate buffers:
+
+```c
+ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
+ggml_backend_buffer_t buf = ggml_backend_buft_alloc_buffer(buft, size_in_bytes);
+// ... assign tensors into buf ...
+ggml_backend_buffer_free(buf);
+```
+
+Buffer usage hints let the scheduler make better decisions:
+
+```c
+// Mark a buffer as holding model weights
+ggml_backend_buffer_set_usage(buf_weights, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+```
+
+### ggml_backend_dev_t and device discovery
+
+Every registered backend exposes one or more `ggml_backend_dev_t` objects. You can enumerate all available devices at runtime:
+
+```c
+ggml_backend_load_all(); // load all compiled-in backends
+
+size_t count = ggml_backend_dev_count();
+for (size_t i = 0; i < count; i++) {
+    ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+    struct ggml_backend_dev_props props;
+    ggml_backend_dev_get_props(dev, &props);
+    printf("%s: %s (%.1f GB free)\n",
+           props.name,
+           props.description,
+           props.memory_free / 1e9);
+}
+```
+
+Device types are defined by `ggml_backend_dev_type`:
+
+| Enum value | Meaning |
+|------------|---------|
+| `GGML_BACKEND_DEVICE_TYPE_CPU` | CPU using system memory |
+| `GGML_BACKEND_DEVICE_TYPE_GPU` | Discrete GPU with dedicated memory |
+| `GGML_BACKEND_DEVICE_TYPE_IGPU` | Integrated GPU using host memory |
+| `GGML_BACKEND_DEVICE_TYPE_ACCEL` | Accelerator used alongside the CPU (e.g. BLAS, AMX) |
+
+Convenience initializers select a backend without enumerating devices manually:
+
+```c
+// Best available GPU, or CPU if no GPU is found
+ggml_backend_t backend = ggml_backend_init_best();
+
+// First device of a specific type
+ggml_backend_t cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
+
+// Backend by name (e.g. "CUDA0", "Metal")
+ggml_backend_t named = ggml_backend_init_by_name("CUDA0", NULL);
+```
+
+## The backend scheduler
+
+`ggml_backend_sched_t` lets you run a single computation graph across multiple backends simultaneously. The scheduler:
+
+- Assigns each graph node to the backend that best supports the operation
+- Copies tensors between backends automatically when needed
+- Allocates compute buffers on each backend
+- Prioritises backends with a lower index in the array you supply
+
+Tensors allocated in buffers marked `GGML_BACKEND_BUFFER_USAGE_WEIGHTS` are preferentially assigned to whichever backend owns those weights.
+
+```c
+ggml_backend_t backends[2] = { gpu_backend, cpu_backend };
+ggml_backend_sched_t sched = ggml_backend_sched_new(
+    backends,
+    NULL,                      // use default buffer types
+    2,                         // number of backends
+    GGML_DEFAULT_GRAPH_SIZE,   // max nodes in graph
+    false,                     // parallel splits
+    true                       // op offload
+);
+```
+
+The scheduler API follows a straightforward lifecycle:
+
+<Steps>
+  <Step title="Reserve (optional)">
+    Pass a representative max-size graph to pre-allocate buffers. This avoids allocation at compute time.
+
+    ```c
+    struct ggml_cgraph * measure_graph = build_graph(sched, MAX_BATCH);
+    ggml_backend_sched_reserve(sched, measure_graph);
+    ```
+  </Step>
+  <Step title="Reset">
+    Clear allocations from the previous graph before computing a new one.
+
+    ```c
+    ggml_backend_sched_reset(sched);
+    ```
+  </Step>
+  <Step title="Allocate">
+    Explicitly allocate the graph (skipped automatically on first compute).
+
+    ```c
+    ggml_backend_sched_alloc_graph(sched, graph);
+    ```
+  </Step>
+  <Step title="Set inputs">
+    Copy data into the allocated input tensors.
+
+    ```c
+    ggml_backend_tensor_set(input_tensor, host_data, 0, nbytes);
+    ```
+  </Step>
+  <Step title="Compute">
+    Execute the graph. Returns a `ggml_status` value.
+
+    ```c
+    ggml_backend_sched_graph_compute(sched, graph);
+    ```
+  </Step>
+  <Step title="Read outputs">
+    Copy results back to host memory.
+
+    ```c
+    ggml_backend_tensor_get(result, out_data, 0, nbytes);
+    ```
+  </Step>
+</Steps>
+
+## Complete example
+
+The following is drawn directly from `examples/simple/simple-backend.cpp` and shows the full lifecycle — backend selection, graph construction, scheduling, and result retrieval.
+
+```cpp
+#include "ggml.h"
+#include "ggml-backend.h"
+
+struct simple_model {
+    struct ggml_tensor * a {};
+    struct ggml_tensor * b {};
+    ggml_backend_t backend {};
+    ggml_backend_t cpu_backend {};
+    ggml_backend_sched_t sched {};
+    std::vector<uint8_t> buf;
+};
+
+void init_model(simple_model & model) {
+    ggml_backend_load_all();
+
+    // Pick the best available GPU, fall back to CPU
+    model.backend = ggml_backend_init_best();
+    model.cpu_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+
+    ggml_backend_t backends[2] = { model.backend, model.cpu_backend };
+    model.sched = ggml_backend_sched_new(backends, nullptr, 2,
+                                         GGML_DEFAULT_GRAPH_SIZE, false, true);
+}
+
+struct ggml_cgraph * build_graph(simple_model & model) {
+    size_t buf_size = ggml_tensor_overhead() * GGML_DEFAULT_GRAPH_SIZE
+                    + ggml_graph_overhead();
+    model.buf.resize(buf_size);
+
+    struct ggml_init_params params = {
+        .mem_size   = buf_size,
+        .mem_buffer = model.buf.data(),
+        .no_alloc   = true,
+    };
+    struct ggml_context * ctx = ggml_init(params);
+    struct ggml_cgraph  * gf  = ggml_new_graph(ctx);
+
+    model.a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 2, 4);
+    model.b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 2, 3);
+
+    struct ggml_tensor * result = ggml_mul_mat(ctx, model.a, model.b);
+    ggml_build_forward_expand(gf, result);
+    ggml_free(ctx);
+    return gf;
+}
+
+struct ggml_tensor * compute(simple_model & model, struct ggml_cgraph * gf) {
+    ggml_backend_sched_reset(model.sched);
+    ggml_backend_sched_alloc_graph(model.sched, gf);
+
+    ggml_backend_tensor_set(model.a, matrix_A, 0, ggml_nbytes(model.a));
+    ggml_backend_tensor_set(model.b, matrix_B, 0, ggml_nbytes(model.b));
+
+    ggml_backend_sched_graph_compute(model.sched, gf);
+    return ggml_graph_node(gf, -1);
+}
+
+int main(void) {
+    simple_model model;
+    init_model(model);
+
+    struct ggml_cgraph * gf = build_graph(model);
+    struct ggml_tensor * result = compute(model, gf);
+
+    std::vector<float> out(ggml_nelements(result));
+    ggml_backend_tensor_get(result, out.data(), 0, ggml_nbytes(result));
+
+    ggml_backend_sched_free(model.sched);
+    ggml_backend_free(model.backend);
+    ggml_backend_free(model.cpu_backend);
+}
+```
+
+## Available backends
+
+| Backend | Platforms | Hardware | Build flag |
+|---------|-----------|----------|-----------|
+| CPU | All | x86, ARM, RISC-V, PowerPC | Always available |
+| CUDA | Linux, Windows | NVIDIA GPUs | `-DGGML_CUDA=ON` |
+| Metal | macOS 13+ | Apple Silicon, AMD GPUs | `-DGGML_METAL=ON` |
+| Vulkan | Linux, Windows, Android | Cross-vendor GPUs | `-DGGML_VULKAN=ON` |
+| OpenCL | Linux, Windows, Android | AMD, Intel, Qualcomm | `-DGGML_OPENCL=ON` |
+| SYCL | Linux | Intel GPUs, oneAPI | `-DGGML_SYCL=ON` |
+| RPC | All | Remote devices | `-DGGML_RPC=ON` |
+
+<CardGroup cols={3}>
+  <Card title="CPU backend" icon="microchip" href="/backends/cpu">
+    SIMD-optimised execution on x86 and ARM with configurable thread pools.
+  </Card>
+  <Card title="CUDA backend" icon="bolt" href="/backends/cuda">
+    NVIDIA GPU acceleration with multi-GPU and split-tensor support.
+  </Card>
+  <Card title="Metal backend" icon="apple" href="/backends/metal">
+    Native Apple GPU compute for macOS and Apple Silicon.
+  </Card>
+  <Card title="Vulkan backend" icon="layer-group" href="/backends/vulkan">
+    Cross-vendor GPU support for Linux, Windows, and Android.
+  </Card>
+  <Card title="RPC backend" icon="network-wired" href="/backends/rpc">
+    Distribute computation to remote machines over the network.
+  </Card>
+</CardGroup>

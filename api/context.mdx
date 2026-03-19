@@ -1,0 +1,158 @@
+---
+title: "Context API"
+description: "Manage ggml memory contexts"
+---
+
+A `ggml_context` is an arena allocator that owns all tensors, graphs, and work buffers created within it. You allocate a fixed-size memory pool at initialization time, then every subsequent allocation is a bump-pointer advance into that pool — no per-object `malloc` or `free` calls during computation.
+
+<Note>
+All tensors created with the same context share its memory pool. Plan your memory budget carefully, or use `ggml_used_mem()` after graph construction to measure actual usage.
+</Note>
+
+## `ggml_init_params`
+
+Passed to `ggml_init()` to configure the context.
+
+```c
+struct ggml_init_params {
+    size_t mem_size;   // bytes
+    void * mem_buffer; // if NULL, memory will be allocated internally
+    bool   no_alloc;   // don't allocate memory for the tensor data
+};
+```
+
+<ParamField body="mem_size" type="size_t" required>
+  Size of the memory pool in bytes. All tensor metadata and (unless `no_alloc` is true) tensor data is allocated from this pool.
+</ParamField>
+
+<ParamField body="mem_buffer" type="void *">
+  Pointer to a caller-owned buffer of at least `mem_size` bytes. When `NULL`, ggml internally allocates the buffer with `malloc`.
+</ParamField>
+
+<ParamField body="no_alloc" type="bool">
+  When `true`, tensor structs are allocated from the pool but tensor data pointers are left `NULL`. Use this when you plan to bind external data buffers (e.g., from a GPU backend) after context creation.
+</ParamField>
+
+## Lifecycle functions
+
+### `ggml_init`
+
+```c
+struct ggml_context * ggml_init(struct ggml_init_params params);
+```
+
+Creates a new context using the provided params. Returns `NULL` on failure. If `params.mem_buffer` is `NULL`, the library allocates the backing memory internally and owns it.
+
+```c
+struct ggml_init_params params = {
+    .mem_size   = 64 * 1024 * 1024, // 64 MB
+    .mem_buffer = NULL,
+    .no_alloc   = false,
+};
+struct ggml_context * ctx = ggml_init(params);
+```
+
+### `ggml_reset`
+
+```c
+void ggml_reset(struct ggml_context * ctx);
+```
+
+Resets the context's allocation cursor back to the start of the pool, discarding all tensors and graphs allocated within it. The memory pool itself is retained. Use this to reuse a context across multiple inference passes without the overhead of `ggml_free` / `ggml_init`.
+
+### `ggml_free`
+
+```c
+void ggml_free(struct ggml_context * ctx);
+```
+
+Destroys the context and releases the backing memory pool (only when the pool was allocated by ggml internally). After this call, all pointers into the context are invalid.
+
+## Memory inspection
+
+### `ggml_used_mem`
+
+```c
+size_t ggml_used_mem(const struct ggml_context * ctx);
+```
+
+Returns the number of bytes consumed so far in the context's pool. Useful for right-sizing your `mem_size` after a trial run.
+
+```c
+// Build graph, then measure
+size_t used = ggml_used_mem(ctx);
+printf("graph uses %zu bytes\n", used);
+```
+
+### `ggml_get_mem_buffer`
+
+```c
+void * ggml_get_mem_buffer(const struct ggml_context * ctx);
+```
+
+Returns a pointer to the start of the context's raw memory pool.
+
+### `ggml_get_mem_size`
+
+```c
+size_t ggml_get_mem_size(const struct ggml_context * ctx);
+```
+
+Returns the total capacity of the context's memory pool in bytes (the value passed as `mem_size` at initialization).
+
+### `ggml_get_max_tensor_size`
+
+```c
+size_t ggml_get_max_tensor_size(const struct ggml_context * ctx);
+```
+
+Returns the size in bytes of the largest contiguous tensor that can still be allocated in the remaining pool space.
+
+## No-alloc control
+
+The `no_alloc` flag can be toggled after context creation, which is useful when switching between planning and execution phases.
+
+### `ggml_get_no_alloc`
+
+```c
+bool ggml_get_no_alloc(struct ggml_context * ctx);
+```
+
+Returns the current value of the `no_alloc` flag.
+
+### `ggml_set_no_alloc`
+
+```c
+void ggml_set_no_alloc(struct ggml_context * ctx, bool no_alloc);
+```
+
+Sets the `no_alloc` flag. When `true`, subsequent `ggml_new_tensor_*` calls allocate the tensor struct but leave `tensor->data` as `NULL`.
+
+## Arena allocator model
+
+ggml uses a simple bump-pointer (arena) allocator internally:
+
+1. `ggml_init()` acquires one contiguous block of memory of exactly `mem_size` bytes.
+2. Every `ggml_new_tensor_*`, `ggml_new_graph`, and internal work buffer call advances the pool cursor forward.
+3. There is **no per-object deallocation**. All memory is released at once by `ggml_free()` or reclaimed by `ggml_reset()`.
+
+This design avoids allocator overhead inside the hot compute path and ensures predictable memory usage.
+
+<Tip>
+Call `ggml_used_mem()` right after building your computation graph but before running it to determine the minimum `mem_size` needed for future runs.
+</Tip>
+
+### Overhead helpers
+
+Use these constants to pre-calculate how much pool space ggml's internal bookkeeping structures consume before your tensor data:
+
+```c
+// Per-tensor overhead (struct ggml_object header + alignment)
+size_t overhead = ggml_tensor_overhead();
+
+// Per-graph overhead for a graph of the given size
+size_t graph_overhead      = ggml_graph_overhead();
+size_t graph_overhead_cust = ggml_graph_overhead_custom(size, grads);
+```
+
+Subtract these from your total `mem_size` budget when estimating how many tensors will fit.

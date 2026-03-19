@@ -1,0 +1,217 @@
+---
+title: "Computation Graph"
+description: "ggml uses a deferred execution model: operations build a graph, and computation happens only when you explicitly request it."
+---
+
+ggml separates the *definition* of a computation from its *execution*. When you call `ggml_add`, `ggml_mul_mat`, or any other operation, no arithmetic is performed — instead, a new tensor node is allocated that records the operation and its inputs. Actual computation runs only when you call a graph compute function.
+
+This design means:
+
+- The same graph can be executed repeatedly (e.g., for each inference batch) without re-allocation overhead.
+- Backends (CPU, CUDA, Metal, …) receive the full graph and can optimize execution order, fuse kernels, and schedule memory.
+
+## The `ggml_cgraph` structure
+
+A computation graph is represented by `ggml_cgraph`, which tracks:
+
+- **nodes** — tensors that require computation (operation outputs)
+- **leafs** — tensors with no inputs (parameters, constants)
+- **grads** — gradient tensors, populated after `ggml_build_backward_expand`
+
+Create a graph inside a context:
+
+```c
+// Default size (GGML_DEFAULT_GRAPH_SIZE = 2048 nodes), no gradient storage
+struct ggml_cgraph * gf = ggml_new_graph(ctx);
+
+// Custom size and optional gradient support
+struct ggml_cgraph * gf = ggml_new_graph_custom(ctx, 4096, /*grads=*/true);
+```
+
+## Full workflow
+
+### Step 1 — Initialize a context
+
+```c
+// Calculate required buffer size up front
+size_t ctx_size = 0;
+ctx_size += rows_A * cols_A * ggml_type_size(GGML_TYPE_F32); // tensor a
+ctx_size += rows_B * cols_B * ggml_type_size(GGML_TYPE_F32); // tensor b
+ctx_size += 2 * ggml_tensor_overhead();  // metadata for each tensor
+ctx_size += ggml_graph_overhead();       // graph struct overhead
+ctx_size += 1024;                        // some slack
+
+struct ggml_init_params params = {
+    /*.mem_size   =*/ ctx_size,
+    /*.mem_buffer =*/ NULL,   // let ggml allocate internally
+    /*.no_alloc   =*/ false,
+};
+
+struct ggml_context * ctx = ggml_init(params);
+```
+
+### Step 2 — Create tensors and define operations
+
+Operations return new tensor nodes but perform no computation:
+
+```c
+// f(x) = a*x^2 + b
+struct ggml_tensor * x  = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+struct ggml_tensor * a  = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+struct ggml_tensor * b  = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+struct ggml_tensor * x2 = ggml_mul(ctx, x, x);
+struct ggml_tensor * f  = ggml_add(ctx, ggml_mul(ctx, a, x2), b);
+```
+
+### Step 3 — Build the forward graph
+
+`ggml_build_forward_expand` walks the tensor graph upward from the output node and registers all reachable nodes into `gf`:
+
+```c
+struct ggml_cgraph * gf = ggml_new_graph(ctx);
+ggml_build_forward_expand(gf, f);
+```
+
+### Step 4 — Set input values
+
+```c
+ggml_set_f32(x, 2.0f);
+ggml_set_f32(a, 3.0f);
+ggml_set_f32(b, 4.0f);
+```
+
+### Step 5 — Compute
+
+```c
+ggml_graph_compute_with_ctx(ctx, gf, /*n_threads=*/1);
+
+printf("f = %f\n", ggml_get_f32_1d(f, 0));  // 3*4 + 4 = 16.0
+```
+
+### Step 6 — Free
+
+```c
+ggml_free(ctx);
+```
+
+## Matrix multiplication example
+
+The following is adapted from `examples/simple/simple-ctx.cpp`:
+
+```c
+void load_model(simple_model & model, float * a, float * b,
+                int rows_A, int cols_A, int rows_B, int cols_B)
+{
+    size_t ctx_size = 0;
+    ctx_size += rows_A * cols_A * ggml_type_size(GGML_TYPE_F32);
+    ctx_size += rows_B * cols_B * ggml_type_size(GGML_TYPE_F32);
+    ctx_size += 2 * ggml_tensor_overhead();
+    ctx_size += ggml_graph_overhead();
+    ctx_size += 1024;
+
+    struct ggml_init_params params = {
+        /*.mem_size   =*/ ctx_size,
+        /*.mem_buffer =*/ NULL,
+        /*.no_alloc   =*/ false,
+    };
+
+    model.ctx = ggml_init(params);
+    model.a   = ggml_new_tensor_2d(model.ctx, GGML_TYPE_F32, cols_A, rows_A);
+    model.b   = ggml_new_tensor_2d(model.ctx, GGML_TYPE_F32, cols_B, rows_B);
+
+    memcpy(model.a->data, a, ggml_nbytes(model.a));
+    memcpy(model.b->data, b, ggml_nbytes(model.b));
+}
+
+struct ggml_cgraph * build_graph(const simple_model & model) {
+    struct ggml_cgraph * gf = ggml_new_graph(model.ctx);
+
+    // result = a * b^T
+    struct ggml_tensor * result = ggml_mul_mat(model.ctx, model.a, model.b);
+    ggml_build_forward_expand(gf, result);
+    return gf;
+}
+
+struct ggml_tensor * compute(const simple_model & model) {
+    struct ggml_cgraph * gf = build_graph(model);
+    ggml_graph_compute_with_ctx(model.ctx, gf, /*n_threads=*/1);
+    return ggml_graph_node(gf, -1); // last node = output
+}
+```
+
+## Marking tensors as inputs and outputs
+
+When using the backend allocator (`ggml_gallocr`), you should mark tensors explicitly so that the allocator can make better decisions about memory layout:
+
+```c
+// Inputs are allocated at the start of the graph in non-overlapping addresses
+ggml_set_input(tensor);
+
+// Output tensors are never freed or overwritten during graph execution
+ggml_set_output(tensor);
+```
+
+These correspond to `GGML_TENSOR_FLAG_INPUT` and `GGML_TENSOR_FLAG_OUTPUT` in `tensor->flags`.
+
+## Inspecting the graph
+
+```c
+int n = ggml_graph_n_nodes(gf);
+for (int i = 0; i < n; i++) {
+    struct ggml_tensor * node = ggml_graph_node(gf, i);
+    printf("%s: %s\n", node->name, ggml_op_name(node->op));
+}
+
+// Dump as Graphviz dot
+ggml_graph_dump_dot(gf, NULL, "graph.dot");
+
+// Print summary
+ggml_graph_print(gf);
+```
+
+<Tip>
+Pass `-1` to `ggml_graph_node` to get the last node, which is typically the final output tensor:
+
+```c
+struct ggml_tensor * out = ggml_graph_node(gf, -1);
+```
+</Tip>
+
+## Compute functions reference
+
+<AccordionGroup>
+  <Accordion title="ggml_graph_compute_with_ctx">
+    Convenience wrapper that allocates the work buffer inside the context. Requires that you have reserved enough space in the context for the work buffer.
+
+    ```c
+    enum ggml_status ggml_graph_compute_with_ctx(
+        struct ggml_context * ctx,
+        struct ggml_cgraph  * cgraph,
+        int                   n_threads);
+    ```
+  </Accordion>
+  <Accordion title="ggml_graph_plan / ggml_graph_compute">
+    Lower-level API that lets you supply your own work buffer.
+
+    ```c
+    struct ggml_cplan plan = ggml_graph_plan(cgraph, n_threads, /*threadpool=*/NULL);
+    if (plan.work_size > 0) {
+        plan.work_data = malloc(plan.work_size);
+    }
+    ggml_graph_compute(cgraph, &plan);
+    free(plan.work_data);
+    ```
+  </Accordion>
+  <Accordion title="Backend API (ggml_backend_graph_compute)">
+    When using a hardware backend, dispatch through the backend scheduler:
+
+    ```c
+    // From simple-backend.cpp
+    ggml_backend_sched_reset(model.sched);
+    ggml_backend_sched_alloc_graph(model.sched, gf);
+    ggml_backend_tensor_set(model.a, matrix_A, 0, ggml_nbytes(model.a));
+    ggml_backend_tensor_set(model.b, matrix_B, 0, ggml_nbytes(model.b));
+    ggml_backend_sched_graph_compute(model.sched, gf);
+    ```
+  </Accordion>
+</AccordionGroup>

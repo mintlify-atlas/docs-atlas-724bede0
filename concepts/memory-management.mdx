@@ -1,0 +1,203 @@
+---
+title: "Memory Management"
+description: "ggml uses an arena allocator for tensors and metadata, with separate backend buffers for compute data."
+---
+
+ggml avoids `malloc`/`free` at inference time. Instead, all tensor metadata and graph structures are allocated from a single fixed-size buffer provided at context creation. Tensor data for GPU or accelerated backends lives in separate backend buffers managed by the backend layer.
+
+## The arena allocator
+
+Every `ggml_context` owns a contiguous memory arena. All `ggml_new_tensor_*` and `ggml_new_graph` calls bump-allocate from this arena. When you call `ggml_free`, the entire arena is released in one shot.
+
+This model means:
+
+- Zero per-tensor allocation overhead during graph execution.
+- Predictable memory usage — you know the upper bound at startup.
+- No fragmentation.
+
+## `ggml_init_params`
+
+```c
+struct ggml_init_params {
+    size_t mem_size;   // arena size in bytes
+    void * mem_buffer; // if NULL, ggml calls malloc internally
+    bool   no_alloc;   // do not allocate data storage for tensors
+};
+```
+
+| Field | Description |
+|-------|-------------|
+| `mem_size` | Total bytes available to the context. Must fit all tensor metadata, graph structs, and (if `no_alloc = false`) tensor data. |
+| `mem_buffer` | Optional externally-owned buffer. Pass `NULL` to let ggml allocate. |
+| `no_alloc` | When `true`, tensors are created with `data = NULL`. Use this when tensor data will be allocated by a backend buffer (`ggml_gallocr`). |
+
+## Computing required memory
+
+To size the arena correctly, account for every tensor and the graph struct:
+
+```c
+size_t ctx_size = 0;
+
+// Per-tensor: raw data storage
+ctx_size += rows_A * cols_A * ggml_type_size(GGML_TYPE_F32);
+ctx_size += rows_B * cols_B * ggml_type_size(GGML_TYPE_F32);
+
+// Per-tensor: struct overhead (name, type, ne, nb, src, ...)
+ctx_size += 2 * ggml_tensor_overhead();
+
+// Graph struct overhead
+ctx_size += ggml_graph_overhead();
+
+// Safety slack
+ctx_size += 1024;
+
+struct ggml_init_params params = {
+    .mem_size   = ctx_size,
+    .mem_buffer = NULL,
+    .no_alloc   = false,
+};
+
+struct ggml_context * ctx = ggml_init(params);
+```
+
+`ggml_tensor_overhead()` and `ggml_graph_overhead()` return the constant size of the respective structs (including internal alignment padding), so you can always compute an exact upper bound.
+
+## Querying used memory
+
+After building the graph you can ask how much of the arena was actually consumed:
+
+```c
+size_t used = ggml_used_mem(ctx);
+printf("used %zu of %zu bytes\n", used, ctx_size);
+```
+
+This is useful for right-sizing the arena on subsequent runs.
+
+## `no_alloc` mode and backend buffers
+
+When using hardware backends (CUDA, Metal, Vulkan, …) tensor data must live in device memory — not in the CPU-side arena. The standard pattern is:
+
+1. Create the context with `no_alloc = true` so the arena only stores tensor metadata.
+2. Build the graph.
+3. Use `ggml_gallocr` or `ggml_backend_alloc_ctx_tensors` to allocate device memory for all tensors.
+
+```c
+// From simple-backend.cpp
+size_t buf_size = ggml_tensor_overhead() * GGML_DEFAULT_GRAPH_SIZE
+                + ggml_graph_overhead();
+
+std::vector<uint8_t> buf(buf_size);
+
+struct ggml_init_params params = {
+    /*.mem_size   =*/ buf_size,
+    /*.mem_buffer =*/ buf.data(),  // caller-owned buffer
+    /*.no_alloc   =*/ true,        // tensor data allocated by backend
+};
+
+struct ggml_context * ctx = ggml_init(params);
+
+// ... build graph with ggml_new_tensor_* and ops ...
+
+ggml_free(ctx); // only frees metadata; backend buffers managed separately
+```
+
+## `ggml_gallocr` — graph-level allocation
+
+`ggml_gallocr` allocates tensor data for an entire graph in a single backend buffer, using live-range analysis to overlap buffers of non-simultaneously-live tensors.
+
+```c
+#include "ggml-alloc.h"
+
+// Create allocator for the CPU backend buffer type
+ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
+
+// Optional: reserve a worst-case graph up front to avoid re-allocations
+ggml_gallocr_reserve(galloc, build_graph(max_batch));
+
+// For each inference call:
+struct ggml_cgraph * graph = build_graph(batch);
+ggml_gallocr_alloc_graph(galloc, graph);
+
+printf("compute buffer: %zu bytes\n",
+       ggml_gallocr_get_buffer_size(galloc, 0));
+
+// Evaluate the graph
+ggml_backend_graph_compute(backend, graph);
+
+// Free the allocator when done
+ggml_gallocr_free(galloc);
+```
+
+<Tip>
+Call `ggml_gallocr_reserve` once with a graph that represents the largest possible input shape. Subsequent `ggml_gallocr_alloc_graph` calls will reuse the same buffer without re-allocation as long as the topology stays the same.
+</Tip>
+
+### Multi-backend allocation
+
+When using a backend scheduler that spans multiple devices, pass one buffer type per device:
+
+```c
+ggml_backend_buffer_type_t bufs[] = {
+    ggml_backend_get_default_buffer_type(gpu_backend),
+    ggml_backend_cpu_buffer_type(),
+};
+
+ggml_gallocr_t galloc = ggml_gallocr_new_n(bufs, 2);
+```
+
+## Tensor-level allocation
+
+For finer-grained control, `ggml_tallocr` allocates individual tensors from a backend buffer:
+
+```c
+ggml_backend_buffer_t buffer = ggml_backend_alloc_buffer(backend, buffer_size);
+struct ggml_tallocr talloc   = ggml_tallocr_new(buffer);
+
+ggml_tallocr_alloc(&talloc, tensor_a);
+ggml_tallocr_alloc(&talloc, tensor_b);
+```
+
+## Allocating all tensors in a context
+
+If you created a context with `no_alloc = true` and want to allocate all its tensors on a specific backend in one call:
+
+```c
+// Allocate on a specific backend
+struct ggml_backend_buffer * buf =
+    ggml_backend_alloc_ctx_tensors(ctx, backend);
+
+// Allocate from a specific buffer type
+struct ggml_backend_buffer * buf =
+    ggml_backend_alloc_ctx_tensors_from_buft(ctx, buffer_type);
+
+// Query size without allocating
+size_t needed =
+    ggml_backend_alloc_ctx_tensors_from_buft_size(ctx, buffer_type);
+```
+
+## Context lifecycle
+
+```c
+struct ggml_context * ctx = ggml_init(params);
+
+// ... create tensors, build and compute graph ...
+
+// Reset the context (free all objects, keep the buffer)
+ggml_reset(ctx);
+
+// Or fully free the context and its buffer (if internally allocated)
+ggml_free(ctx);
+```
+
+`ggml_reset` lets you reuse the same memory region for a different graph without going through `ggml_init` again.
+
+## Memory layout summary
+
+<CardGroup cols={2}>
+  <Card title="Context arena" icon="database">
+    Holds `ggml_tensor` structs, `ggml_cgraph`, and (when `no_alloc = false`) tensor data. Sized with `ggml_tensor_overhead()` and `ggml_graph_overhead()`.
+  </Card>
+  <Card title="Backend buffer" icon="microchip">
+    Holds actual tensor data in device memory (CPU heap, CUDA VRAM, Metal shared memory, …). Allocated via `ggml_gallocr` or `ggml_backend_alloc_*`.
+  </Card>
+</CardGroup>

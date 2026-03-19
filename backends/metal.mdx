@@ -1,0 +1,115 @@
+---
+title: "Metal backend"
+description: "Native Apple GPU compute for macOS and Apple Silicon"
+---
+
+The Metal backend runs tensor operations on Apple GPUs using Metal compute shaders. It is the recommended backend for macOS and provides the best performance on Apple Silicon (M-series) chips as well as AMD GPUs on Intel Macs.
+
+## Requirements
+
+- macOS 13.0 (Ventura) or later
+- Apple Silicon (M1/M2/M3/M4) or AMD GPU on an Intel Mac
+- Xcode Command Line Tools
+
+## Build
+
+```bash
+cmake -B build -DGGML_METAL=ON
+cmake --build build
+```
+
+<Note>
+  On macOS, Metal is detected automatically and `DGGML_METAL=ON` may already be the default in upstream build configurations. Check your `CMakeCache.txt` to confirm.
+</Note>
+
+Useful CMake options:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `GGML_METAL=ON` | OFF (non-Apple) | Enable the Metal backend |
+| `GGML_METAL_EMBED_LIBRARY=ON` | OFF | Embed the Metal shader library into the binary |
+| `GGML_METAL_SHADER_DEBUG=ON` | OFF | Compile shaders with debug info |
+
+## Initialization
+
+```c
+#include "ggml-metal.h"
+
+ggml_backend_t backend = ggml_backend_metal_init();
+if (!backend) {
+    fprintf(stderr, "failed to initialize Metal backend\n");
+    return 1;
+}
+```
+
+Alternatively, use the generic backend selector:
+
+```c
+ggml_backend_load_all();
+ggml_backend_t backend = ggml_backend_init_best();
+// On macOS with a supported GPU, this returns the Metal backend
+```
+
+## Checking GPU family support
+
+Metal devices are organised into feature families. You can query whether the device supports a specific family before using features that depend on it:
+
+```c
+// Check for Apple7 family (A15/M2 and newer)
+if (ggml_backend_metal_supports_family(backend, 7)) {
+    // Features available: BFloat16 accumulation, etc.
+}
+```
+
+Refer to Apple's [Metal Feature Set Tables](https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf) for the capabilities of each family.
+
+## Abort callback
+
+Register a callback to cancel a Metal compute pass early:
+
+```c
+bool my_abort(void * user_data) {
+    return should_cancel;
+}
+
+ggml_backend_metal_set_abort_callback(backend, my_abort, NULL);
+```
+
+## GPU capture
+
+To capture a Metal compute pass with Xcode Instruments, call this before executing the graph you want to capture:
+
+```c
+ggml_backend_metal_capture_next_compute(backend);
+ggml_backend_graph_compute(backend, graph);
+// The captured frame appears in the GPU timeline in Instruments
+```
+
+<Tip>
+  GPU captures require running the process from Xcode or with Metal capture enabled in the scheme. Use this during development to profile shader performance.
+</Tip>
+
+## Using Metal with the scheduler
+
+Metal works with `ggml_backend_sched_t` the same way any other backend does. Add a CPU backend as a fallback for operations not yet implemented in Metal:
+
+```c
+ggml_backend_t metal = ggml_backend_metal_init();
+ggml_backend_t cpu   = ggml_backend_cpu_init();
+
+ggml_backend_t backends[2] = { metal, cpu };
+ggml_backend_sched_t sched = ggml_backend_sched_new(
+    backends, NULL, 2, GGML_DEFAULT_GRAPH_SIZE, false, true
+);
+```
+
+## API summary
+
+| Function | Description |
+|----------|-------------|
+| `ggml_backend_metal_init()` | Create a Metal backend instance |
+| `ggml_backend_is_metal(backend)` | Check whether a backend is the Metal backend |
+| `ggml_backend_metal_supports_family(backend, family)` | Query GPU feature family support |
+| `ggml_backend_metal_set_abort_callback(backend, cb, data)` | Register an abort callback |
+| `ggml_backend_metal_capture_next_compute(backend)` | Capture the next compute pass for Xcode profiling |
+| `ggml_backend_metal_reg()` | Return the Metal backend registry entry |

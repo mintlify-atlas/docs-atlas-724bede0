@@ -1,0 +1,390 @@
+---
+title: "Simple example"
+description: "Minimal working examples of ggml computation"
+---
+
+The `examples/simple` directory contains two minimal programs that each multiply two matrices using ggml. They demonstrate the two main approaches to memory and compute management:
+
+<CardGroup cols={2}>
+  <Card title="simple-ctx" icon="cube">
+    Context-based allocation. All tensors and the compute graph live in a single `ggml_context`. Simple to use; CPU-only.
+  </Card>
+  <Card title="simple-backend" icon="server">
+    Backend-based allocation. Separates graph definition from execution. Supports CPU, CUDA, Metal, and other backends.
+  </Card>
+</CardGroup>
+
+Both programs compute `A × Bᵀ` for two matrices and print the result.
+
+## Context-based approach (`simple-ctx.cpp`)
+
+This is the legacy API. Memory for tensors and the compute graph is allocated inside a single `ggml_context` using a fixed-size memory pool.
+
+<Steps>
+  <Step title="Calculate and allocate the memory pool">
+    Before creating any tensors you must calculate the total memory needed and pass it to `ggml_init`:
+
+    ```cpp
+    size_t ctx_size = 0;
+    ctx_size += rows_A * cols_A * ggml_type_size(GGML_TYPE_F32); // tensor a
+    ctx_size += rows_B * cols_B * ggml_type_size(GGML_TYPE_F32); // tensor b
+    ctx_size += 2 * ggml_tensor_overhead();  // tensor metadata
+    ctx_size += ggml_graph_overhead();       // compute graph
+    ctx_size += 1024;                        // general overhead
+
+    struct ggml_init_params params {
+        /*.mem_size   =*/ ctx_size,
+        /*.mem_buffer =*/ NULL,
+        /*.no_alloc   =*/ false, // allocate tensor data inside the context
+    };
+
+    model.ctx = ggml_init(params);
+    ```
+
+    Setting `no_alloc = false` means tensor data buffers are allocated immediately inside the memory pool.
+  </Step>
+
+  <Step title="Create tensors and copy data">
+    Allocate 2D tensors and copy the input matrices into them:
+
+    ```cpp
+    model.a = ggml_new_tensor_2d(model.ctx, GGML_TYPE_F32, cols_A, rows_A);
+    model.b = ggml_new_tensor_2d(model.ctx, GGML_TYPE_F32, cols_B, rows_B);
+
+    memcpy(model.a->data, a, ggml_nbytes(model.a));
+    memcpy(model.b->data, b, ggml_nbytes(model.b));
+    ```
+
+    <Note>
+    Note the argument order for `ggml_new_tensor_2d`: dimensions are `(cols, rows)` because ggml uses column-major storage.
+    </Note>
+  </Step>
+
+  <Step title="Build the compute graph">
+    Describe the computation by connecting tensors with operations. `ggml_mul_mat(a, b)` computes `A × Bᵀ`:
+
+    ```cpp
+    struct ggml_cgraph * gf = ggml_new_graph(model.ctx);
+
+    // result = a * b^T
+    struct ggml_tensor * result = ggml_mul_mat(model.ctx, model.a, model.b);
+
+    ggml_build_forward_expand(gf, result);
+    ```
+
+    `ggml_build_forward_expand` walks the tensor dependency tree and records all nodes needed to produce `result`.
+  </Step>
+
+  <Step title="Run the computation">
+    Execute the graph on the CPU:
+
+    ```cpp
+    int n_threads = 1;
+    ggml_graph_compute_with_ctx(model.ctx, gf, n_threads);
+
+    // the output tensor is the last node in the graph
+    struct ggml_tensor * result = ggml_graph_node(gf, -1);
+    ```
+  </Step>
+
+  <Step title="Read the result and free memory">
+    Copy output data out of the tensor buffer, then free the context:
+
+    ```cpp
+    std::vector<float> out_data(ggml_nelements(result));
+    memcpy(out_data.data(), result->data, ggml_nbytes(result));
+
+    // expected output:
+    // [ 60.00 55.00 50.00 110.00
+    //   90.00 54.00 54.00 126.00
+    //   42.00 29.00 28.00  64.00 ]
+
+    ggml_free(model.ctx);
+    ```
+  </Step>
+</Steps>
+
+### Full source
+
+```cpp
+#include "ggml.h"
+#include "ggml-cpu.h"
+
+#include <cassert>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <vector>
+
+struct simple_model {
+    struct ggml_tensor * a;
+    struct ggml_tensor * b;
+    struct ggml_context * ctx;
+};
+
+void load_model(simple_model & model, float * a, float * b,
+                int rows_A, int cols_A, int rows_B, int cols_B) {
+    size_t ctx_size = 0;
+    ctx_size += rows_A * cols_A * ggml_type_size(GGML_TYPE_F32);
+    ctx_size += rows_B * cols_B * ggml_type_size(GGML_TYPE_F32);
+    ctx_size += 2 * ggml_tensor_overhead();
+    ctx_size += ggml_graph_overhead();
+    ctx_size += 1024;
+
+    struct ggml_init_params params {
+        /*.mem_size   =*/ ctx_size,
+        /*.mem_buffer =*/ NULL,
+        /*.no_alloc   =*/ false,
+    };
+
+    model.ctx = ggml_init(params);
+    model.a = ggml_new_tensor_2d(model.ctx, GGML_TYPE_F32, cols_A, rows_A);
+    model.b = ggml_new_tensor_2d(model.ctx, GGML_TYPE_F32, cols_B, rows_B);
+
+    memcpy(model.a->data, a, ggml_nbytes(model.a));
+    memcpy(model.b->data, b, ggml_nbytes(model.b));
+}
+
+struct ggml_cgraph * build_graph(const simple_model & model) {
+    struct ggml_cgraph * gf = ggml_new_graph(model.ctx);
+    struct ggml_tensor * result = ggml_mul_mat(model.ctx, model.a, model.b);
+    ggml_build_forward_expand(gf, result);
+    return gf;
+}
+
+struct ggml_tensor * compute(const simple_model & model) {
+    struct ggml_cgraph * gf = build_graph(model);
+    ggml_graph_compute_with_ctx(model.ctx, gf, /*n_threads=*/1);
+    return ggml_graph_node(gf, -1);
+}
+
+int main(void) {
+    ggml_time_init();
+
+    const int rows_A = 4, cols_A = 2;
+    float matrix_A[rows_A * cols_A] = { 2, 8, 5, 1, 4, 2, 8, 6 };
+
+    const int rows_B = 3, cols_B = 2;
+    float matrix_B[rows_B * cols_B] = { 10, 5, 9, 9, 5, 4 };
+
+    simple_model model;
+    load_model(model, matrix_A, matrix_B, rows_A, cols_A, rows_B, cols_B);
+
+    struct ggml_tensor * result = compute(model);
+
+    std::vector<float> out_data(ggml_nelements(result));
+    memcpy(out_data.data(), result->data, ggml_nbytes(result));
+
+    printf("mul mat (%d x %d):\n[", (int) result->ne[0], (int) result->ne[1]);
+    for (int j = 0; j < result->ne[1]; j++) {
+        if (j > 0) printf("\n");
+        for (int i = 0; i < result->ne[0]; i++) {
+            printf(" %.2f", out_data[j * result->ne[0] + i]);
+        }
+    }
+    printf(" ]\n");
+
+    ggml_free(model.ctx);
+    return 0;
+}
+```
+
+## Backend-based approach (`simple-backend.cpp`)
+
+The backend API separates graph definition from execution and works with any ggml backend — CPU, CUDA, Metal, and others. The key difference is that tensor data is allocated by the backend scheduler after the graph is built, not inside a context.
+
+<Steps>
+  <Step title="Initialize backends">
+    Load all available backends and create a scheduler that picks the best device:
+
+    ```cpp
+    ggml_backend_load_all();
+
+    model.backend     = ggml_backend_init_best();       // GPU if available, else CPU
+    model.cpu_backend = ggml_backend_init_by_type(
+        GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+
+    ggml_backend_t backends[2] = { model.backend, model.cpu_backend };
+    model.sched = ggml_backend_sched_new(
+        backends, nullptr, 2, GGML_DEFAULT_GRAPH_SIZE, false, true);
+    ```
+
+    The scheduler runs each graph node on the highest-priority backend that supports the operation, falling back to CPU for unsupported ops.
+  </Step>
+
+  <Step title="Build the compute graph with no_alloc = true">
+    Create a temporary context only to define the graph structure. Set `no_alloc = true` because the scheduler will allocate tensor data later:
+
+    ```cpp
+    size_t buf_size = ggml_tensor_overhead() * GGML_DEFAULT_GRAPH_SIZE
+                    + ggml_graph_overhead();
+    model.buf.resize(buf_size);
+
+    struct ggml_init_params params0 = {
+        /*.mem_size   =*/ buf_size,
+        /*.mem_buffer =*/ model.buf.data(),
+        /*.no_alloc   =*/ true,  // tensors are allocated later by the scheduler
+    };
+
+    struct ggml_context * ctx = ggml_init(params0);
+    struct ggml_cgraph  * gf  = ggml_new_graph(ctx);
+
+    model.a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cols_A, rows_A);
+    model.b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cols_B, rows_B);
+
+    struct ggml_tensor * result = ggml_mul_mat(ctx, model.a, model.b);
+    ggml_build_forward_expand(gf, result);
+
+    ggml_free(ctx); // free the context; the graph buffer outlives it
+    ```
+  </Step>
+
+  <Step title="Allocate and upload tensor data">
+    Let the scheduler allocate backend memory, then upload the input data:
+
+    ```cpp
+    ggml_backend_sched_reset(model.sched);
+    ggml_backend_sched_alloc_graph(model.sched, gf);
+
+    // upload CPU data to the backend (GPU, etc.)
+    ggml_backend_tensor_set(model.a, matrix_A, 0, ggml_nbytes(model.a));
+    ggml_backend_tensor_set(model.b, matrix_B, 0, ggml_nbytes(model.b));
+    ```
+  </Step>
+
+  <Step title="Run the computation">
+    Execute the graph through the scheduler:
+
+    ```cpp
+    ggml_backend_sched_graph_compute(model.sched, gf);
+
+    struct ggml_tensor * result = ggml_graph_node(gf, -1);
+    ```
+  </Step>
+
+  <Step title="Download the result and clean up">
+    Copy output data back to CPU memory, then free all backend resources:
+
+    ```cpp
+    std::vector<float> out_data(ggml_nelements(result));
+    ggml_backend_tensor_get(result, out_data.data(), 0, ggml_nbytes(result));
+
+    // expected output:
+    // [ 60.00 55.00 50.00 110.00
+    //   90.00 54.00 54.00 126.00
+    //   42.00 29.00 28.00  64.00 ]
+
+    ggml_backend_sched_free(model.sched);
+    ggml_backend_free(model.backend);
+    ggml_backend_free(model.cpu_backend);
+    ```
+  </Step>
+</Steps>
+
+### Full source
+
+```cpp
+#include "ggml.h"
+#include "ggml-backend.h"
+
+#include <cstdio>
+#include <cstring>
+#include <vector>
+
+struct simple_model {
+    struct ggml_tensor * a {};
+    struct ggml_tensor * b {};
+    ggml_backend_t backend {};
+    ggml_backend_t cpu_backend {};
+    ggml_backend_sched_t sched {};
+    std::vector<uint8_t> buf;
+};
+
+const int rows_A = 4, cols_A = 2;
+float matrix_A[rows_A * cols_A] = { 2, 8, 5, 1, 4, 2, 8, 6 };
+
+const int rows_B = 3, cols_B = 2;
+float matrix_B[rows_B * cols_B] = { 10, 5, 9, 9, 5, 4 };
+
+void init_model(simple_model & model) {
+    ggml_backend_load_all();
+    model.backend     = ggml_backend_init_best();
+    model.cpu_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    ggml_backend_t backends[2] = { model.backend, model.cpu_backend };
+    model.sched = ggml_backend_sched_new(backends, nullptr, 2,
+                                         GGML_DEFAULT_GRAPH_SIZE, false, true);
+}
+
+struct ggml_cgraph * build_graph(simple_model & model) {
+    size_t buf_size = ggml_tensor_overhead() * GGML_DEFAULT_GRAPH_SIZE
+                    + ggml_graph_overhead();
+    model.buf.resize(buf_size);
+
+    struct ggml_init_params params0 = {
+        /*.mem_size   =*/ buf_size,
+        /*.mem_buffer =*/ model.buf.data(),
+        /*.no_alloc   =*/ true,
+    };
+
+    struct ggml_context * ctx = ggml_init(params0);
+    struct ggml_cgraph  * gf  = ggml_new_graph(ctx);
+
+    model.a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cols_A, rows_A);
+    model.b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cols_B, rows_B);
+
+    struct ggml_tensor * result = ggml_mul_mat(ctx, model.a, model.b);
+    ggml_build_forward_expand(gf, result);
+    ggml_free(ctx);
+    return gf;
+}
+
+struct ggml_tensor * compute(simple_model & model, struct ggml_cgraph * gf) {
+    ggml_backend_sched_reset(model.sched);
+    ggml_backend_sched_alloc_graph(model.sched, gf);
+    ggml_backend_tensor_set(model.a, matrix_A, 0, ggml_nbytes(model.a));
+    ggml_backend_tensor_set(model.b, matrix_B, 0, ggml_nbytes(model.b));
+    ggml_backend_sched_graph_compute(model.sched, gf);
+    return ggml_graph_node(gf, -1);
+}
+
+int main(void) {
+    ggml_time_init();
+
+    simple_model model;
+    init_model(model);
+
+    struct ggml_cgraph * gf     = build_graph(model);
+    struct ggml_tensor * result = compute(model, gf);
+
+    std::vector<float> out_data(ggml_nelements(result));
+    ggml_backend_tensor_get(result, out_data.data(), 0, ggml_nbytes(result));
+
+    printf("mul mat (%d x %d):\n[", (int) result->ne[0], (int) result->ne[1]);
+    for (int j = 0; j < result->ne[1]; j++) {
+        if (j > 0) printf("\n");
+        for (int i = 0; i < result->ne[0]; i++) {
+            printf(" %.2f", out_data[j * result->ne[0] + i]);
+        }
+    }
+    printf(" ]\n");
+
+    ggml_backend_sched_free(model.sched);
+    ggml_backend_free(model.backend);
+    ggml_backend_free(model.cpu_backend);
+    return 0;
+}
+```
+
+## Choosing an approach
+
+| | Context-based (`simple-ctx`) | Backend-based (`simple-backend`) |
+|---|---|---|
+| **Device support** | CPU only | CPU, CUDA, Metal, Vulkan, … |
+| **Memory management** | Single pre-allocated pool | Scheduler allocates per-backend |
+| **Data transfer** | Direct `memcpy` | `ggml_backend_tensor_set` / `_get` |
+| **Complexity** | Lower | Higher |
+| **When to use** | Prototyping, CPU-only tools | Production, GPU acceleration |
+
+<Tip>
+For new projects targeting hardware acceleration, prefer the backend-based API. It is more verbose but works transparently across all ggml-supported devices.
+</Tip>

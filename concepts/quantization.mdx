@@ -1,0 +1,177 @@
+---
+title: "Quantization"
+description: "ggml's block-quantization formats reduce model memory and memory bandwidth at the cost of small accuracy trade-offs."
+---
+
+For LLM inference the dominant cost is not floating-point compute — it is memory bandwidth. A 7B-parameter model stored as F32 occupies ~28 GB. Moving that data from DRAM to compute cores is the primary bottleneck on every platform.
+
+Quantization maps 32-bit floats to smaller integer representations, reducing:
+
+- **Model size** — 4-bit quantization cuts weights from 4 bytes to 0.5 bytes per element.
+- **Memory bandwidth** — the GPU or CPU dequantizes weights on the fly during matrix multiplication.
+- **Load time** — smaller files load faster from disk.
+
+Activations (the intermediate tensors produced during inference) are typically kept at F16 or F32 to preserve accuracy.
+
+## Quantization types
+
+ggml's quantization types are defined in `ggml_type`. The naming convention is:
+
+- **`Q`** prefix — classic block quantization
+- **`K`** suffix — "k-quant" (improved quantization with multiple scales per block)
+- **`IQ`** prefix — "i-quant" (importance-aware quantization, requires an importance matrix)
+
+<AccordionGroup>
+  <Accordion title="Legacy Q-types (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0)">
+    The original ggml quantization formats. Each block stores a shared scale (and optionally a minimum) for a fixed number of elements.
+
+    | Type | Bits/weight | Notes |
+    |------|-------------|-------|
+    | `GGML_TYPE_Q4_0` | 4 | Scale per 32-element block |
+    | `GGML_TYPE_Q4_1` | 4.25 | Scale + minimum per block |
+    | `GGML_TYPE_Q5_0` | 5 | Scale per block |
+    | `GGML_TYPE_Q5_1` | 5.25 | Scale + minimum per block |
+    | `GGML_TYPE_Q8_0` | 8 | Scale per 32-element block |
+  </Accordion>
+  <Accordion title="K-quants (Q2_K … Q8_K)">
+    K-quants use a hierarchy of super-blocks and sub-blocks with multiple scales, giving significantly better accuracy at the same bit-width.
+
+    | Type | Bits/weight | Notes |
+    |------|-------------|-------|
+    | `GGML_TYPE_Q2_K` | 2.5 | 256-element super-blocks |
+    | `GGML_TYPE_Q3_K` | 3.4 | |
+    | `GGML_TYPE_Q4_K` | 4.5 | Preferred 4-bit format |
+    | `GGML_TYPE_Q5_K` | 5.5 | |
+    | `GGML_TYPE_Q6_K` | 6.6 | Near-lossless for most models |
+    | `GGML_TYPE_Q8_K` | 8   | Internal use (dot product accumulation) |
+
+    The `_S` (small) and `_M` (medium) suffixes used in llama.cpp refer to mixed-precision strategies built on top of these types, not separate `ggml_type` values.
+  </Accordion>
+  <Accordion title="I-quants (IQ1_S, IQ2_XXS, IQ3_S, IQ4_NL, …)">
+    I-quants use non-uniform (importance-weighted) quantization grids. They achieve better perplexity than equivalent k-quants at the same bit-width, but require an importance matrix during quantization.
+
+    | Type | Approx. bits/weight |
+    |------|---------------------|
+    | `GGML_TYPE_IQ1_S`   | 1.56 |
+    | `GGML_TYPE_IQ1_M`   | 1.75 |
+    | `GGML_TYPE_IQ2_XXS` | 2.06 |
+    | `GGML_TYPE_IQ2_XS`  | 2.31 |
+    | `GGML_TYPE_IQ2_S`   | 2.5  |
+    | `GGML_TYPE_IQ3_XXS` | 3.06 |
+    | `GGML_TYPE_IQ3_S`   | 3.44 |
+    | `GGML_TYPE_IQ4_NL`  | 4.5  |
+    | `GGML_TYPE_IQ4_XS`  | 4.25 |
+  </Accordion>
+</AccordionGroup>
+
+## Checking whether a type is quantized
+
+```c
+bool ggml_is_quantized(enum ggml_type type);
+
+// Example
+if (ggml_is_quantized(tensor->type)) {
+    printf("quantized: %s\n", ggml_type_name(tensor->type));
+}
+```
+
+## Quantizing data with `ggml_quantize_chunk`
+
+`ggml_quantize_chunk` is the primary entry point for converting F32 data to a quantized format:
+
+```c
+size_t ggml_quantize_chunk(
+    enum ggml_type   type,       // target quantization type
+    const float    * src,        // source F32 data
+    void           * dst,        // destination buffer (pre-allocated)
+    int64_t          start,      // first row index to quantize
+    int64_t          nrows,      // number of rows to quantize
+    int64_t          n_per_row,  // number of elements per row
+    const float    * imatrix);   // importance matrix (NULL if not needed)
+```
+
+The function returns the number of bytes written to `dst`.
+
+<Warning>
+Some quantization types (all `IQ` types) require a non-NULL `imatrix`. Call `ggml_quantize_requires_imatrix(type)` to check before passing NULL.
+</Warning>
+
+### Example: quantize a weight matrix
+
+```c
+const int64_t n_rows      = 4096;
+const int64_t n_per_row   = 4096;
+const int64_t total_elems = n_rows * n_per_row;
+
+float * src = ...; // F32 weights, shape [n_per_row, n_rows]
+
+// Allocate destination buffer using ggml_row_size to get the correct size
+size_t dst_size = ggml_row_size(GGML_TYPE_Q4_K, n_per_row) * n_rows;
+void * dst = malloc(dst_size);
+
+ggml_quantize_chunk(
+    GGML_TYPE_Q4_K,
+    src,
+    dst,
+    /*start=*/0,
+    n_rows,
+    n_per_row,
+    /*imatrix=*/NULL);
+```
+
+### Initialization and cleanup
+
+`ggml_quantize_chunk` calls `ggml_quantize_init` internally. If you need explicit control over when quantization tables are loaded:
+
+```c
+ggml_quantize_init(GGML_TYPE_Q4_K);  // load tables once
+// ... quantize many chunks ...
+ggml_quantize_free();                 // release table memory
+```
+
+Both functions are thread-safe.
+
+## Importance matrices (imatrix)
+
+An importance matrix calibrates which weight values have the most impact on model outputs. Providing one during quantization allows the quantizer to allocate more precision to high-importance values.
+
+The imatrix has shape `[n_per_row]` — one importance score per column of the weight matrix:
+
+```c
+float imatrix[n_per_row] = { ... }; // higher = more important
+
+ggml_quantize_chunk(
+    GGML_TYPE_IQ4_XS,
+    src, dst,
+    /*start=*/0, n_rows, n_per_row,
+    imatrix);  // required for IQ types, beneficial for K-quants
+```
+
+In practice, imatrices are computed by running a calibration dataset through the unquantized model and collecting activation statistics.
+
+## Mixed precision
+
+In a typical LLM deployment:
+
+| Tensor | Type | Reason |
+|--------|------|--------|
+| Weight matrices (large 2-D) | Q4_K, Q5_K, Q6_K, IQ4_XS | Memory savings |
+| Embedding tables | Q4_K or F16 | Rows accessed sparsely |
+| Normalization weights | F32 | Small, sensitive to precision |
+| KV cache | F16 or Q8_0 | Balances bandwidth and accuracy |
+| Activations | F16 or F32 | Full precision avoids error accumulation |
+
+`ggml_mul_mat` handles dequantization internally: the left-hand operand can be any quantized type while the right-hand operand is typically F16 or F32.
+
+## Type traits
+
+You can inspect quantization properties at runtime:
+
+```c
+const struct ggml_type_traits * tt = ggml_get_type_traits(GGML_TYPE_Q4_K);
+
+printf("name:         %s\n",  tt->type_name);
+printf("block size:   %lld\n", tt->blck_size);  // elements per block
+printf("bytes/block:  %zu\n",  tt->type_size);
+printf("is_quantized: %d\n",   tt->is_quantized);
+```

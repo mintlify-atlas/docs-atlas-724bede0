@@ -1,0 +1,437 @@
+---
+title: "GGUF file format"
+description: "Binary file format for storing ggml models"
+---
+
+GGUF is a binary file format for storing models for inference with ggml and executors based on ggml. It is designed for fast loading and saving, ease of reading, and single-file deployment.
+
+GGUF is the successor to the earlier **GGML**, **GGMF**, and **GGJT** formats. The key improvement over GGJT is the use of a typed key-value structure for metadata, rather than a fixed list of untyped hyperparameters. This allows new metadata to be added without breaking compatibility with existing models.
+
+## Design goals
+
+- **Single-file deployment** — models can be distributed and loaded without external files.
+- **Extensibility** — new metadata can be added without breaking existing readers.
+- **`mmap` compatibility** — tensors are aligned so models can be loaded with `mmap`.
+- **Full information** — everything needed to load the model is embedded in the file itself.
+
+## File structure
+
+A GGUF file is laid out sequentially as follows:
+
+```c
+struct gguf_file_t {
+    // The header of the file.
+    gguf_header_t header;
+
+    // Tensor infos, which can be used to locate the tensor data.
+    gguf_tensor_info_t tensor_infos[header.tensor_count];
+
+    // Padding to the nearest multiple of ALIGNMENT.
+    uint8_t _padding[];
+
+    // Tensor data (arbitrary binary weights).
+    uint8_t tensor_data[];
+};
+```
+
+### Header
+
+The header appears at the start of every GGUF file:
+
+```c
+struct gguf_header_t {
+    // Magic number: must be 0x47 0x47 0x55 0x46 ("GGUF").
+    uint32_t magic;
+    // Format version. Current version is 3.
+    uint32_t version;
+    // Number of tensors in the file.
+    uint64_t tensor_count;
+    // Number of metadata key-value pairs.
+    uint64_t metadata_kv_count;
+    // The metadata key-value pairs.
+    gguf_metadata_kv_t metadata_kv[metadata_kv_count];
+};
+```
+
+<Note>
+Models are **little-endian** by default. Big-endian support was added in format version 3. If no additional information is provided, assume the model is little-endian.
+</Note>
+
+### Tensor info
+
+Each tensor is described by a `gguf_tensor_info_t` entry. The actual data starts after all tensor info entries, padded to the alignment boundary:
+
+```c
+struct gguf_tensor_info_t {
+    // Tensor name, at most 64 bytes.
+    gguf_string_t name;
+    // Number of dimensions (currently at most 4).
+    uint32_t n_dimensions;
+    // Size along each dimension.
+    uint64_t dimensions[n_dimensions];
+    // Element data type.
+    ggml_type type;
+    // Byte offset of this tensor's data within the tensor_data blob.
+    // Must be a multiple of ALIGNMENT.
+    uint64_t offset;
+};
+```
+
+### Alignment
+
+The global alignment is set by the `general.alignment` metadata key (default: `32`). Padding bytes (`0x00`) are inserted to align tensor data:
+
+```c
+uint64_t align_offset(uint64_t offset) {
+    return offset + (ALIGNMENT - (offset % ALIGNMENT)) % ALIGNMENT;
+}
+```
+
+## Metadata types
+
+The `gguf_type` enum describes every value type that can appear in a GGUF key-value pair:
+
+```c
+enum gguf_type {
+    GGUF_TYPE_UINT8   = 0,
+    GGUF_TYPE_INT8    = 1,
+    GGUF_TYPE_UINT16  = 2,
+    GGUF_TYPE_INT16   = 3,
+    GGUF_TYPE_UINT32  = 4,
+    GGUF_TYPE_INT32   = 5,
+    GGUF_TYPE_FLOAT32 = 6,
+    GGUF_TYPE_BOOL    = 7,   // stored as int8_t; 0 = false, 1 = true
+    GGUF_TYPE_STRING  = 8,   // uint64_t length + UTF-8 bytes, no null terminator
+    GGUF_TYPE_ARRAY   = 9,   // type + uint64_t count + elements
+    GGUF_TYPE_UINT64  = 10,
+    GGUF_TYPE_INT64   = 11,
+    GGUF_TYPE_FLOAT64 = 12,
+    GGUF_TYPE_COUNT,
+};
+```
+
+All enums are stored as `int32_t`. Strings are serialized as a `uint64_t` length followed by the UTF-8 bytes without a null terminator.
+
+### Key-value pairs
+
+Each metadata entry is a `gguf_metadata_kv_t`:
+
+```c
+struct gguf_metadata_kv_t {
+    // Key: valid ASCII, hierarchical lower_snake_case segments separated by '.',
+    // at most 65535 bytes.
+    gguf_string_t key;
+    gguf_metadata_value_type value_type;
+    gguf_metadata_value_t value;
+};
+```
+
+Keys follow the convention `namespace.property` (e.g. `general.architecture`, `llama.context_length`). Community-defined keys should be prefixed with the community name (e.g. `rustformers.my_key`).
+
+## Tensor element types
+
+The `ggml_type` enum covers all supported tensor element types, including floating-point and quantized formats:
+
+```c
+enum ggml_type: uint32_t {
+    GGML_TYPE_F32     = 0,
+    GGML_TYPE_F16     = 1,
+    GGML_TYPE_Q4_0    = 2,
+    GGML_TYPE_Q4_1    = 3,
+    GGML_TYPE_Q5_0    = 6,
+    GGML_TYPE_Q5_1    = 7,
+    GGML_TYPE_Q8_0    = 8,
+    GGML_TYPE_Q8_1    = 9,
+    GGML_TYPE_Q2_K    = 10,
+    GGML_TYPE_Q3_K    = 11,
+    GGML_TYPE_Q4_K    = 12,
+    GGML_TYPE_Q5_K    = 13,
+    GGML_TYPE_Q6_K    = 14,
+    GGML_TYPE_Q8_K    = 15,
+    GGML_TYPE_IQ2_XXS = 16,
+    GGML_TYPE_IQ2_XS  = 17,
+    GGML_TYPE_IQ3_XXS = 18,
+    GGML_TYPE_IQ1_S   = 19,
+    GGML_TYPE_IQ4_NL  = 20,
+    GGML_TYPE_IQ3_S   = 21,
+    GGML_TYPE_IQ2_S   = 22,
+    GGML_TYPE_IQ4_XS  = 23,
+    GGML_TYPE_I8      = 24,
+    GGML_TYPE_I16     = 25,
+    GGML_TYPE_I32     = 26,
+    GGML_TYPE_I64     = 27,
+    GGML_TYPE_F64     = 28,
+    GGML_TYPE_IQ1_M   = 29,
+    GGML_TYPE_BF16    = 30,
+    GGML_TYPE_TQ1_0   = 34,
+    GGML_TYPE_TQ2_0   = 35,
+    GGML_TYPE_MXFP4   = 39,
+    GGML_TYPE_COUNT   = 40,
+};
+```
+
+## C API
+
+### Initializing a context
+
+```c
+// Open an empty GGUF context (for building a new file).
+struct gguf_context * gguf_init_empty(void);
+
+// Load a GGUF file from disk.
+// Set params.no_alloc = false and params.ctx to a ggml_context to also load tensor data.
+struct gguf_context * gguf_init_from_file(
+    const char * fname,
+    struct gguf_init_params params
+);
+
+void gguf_free(struct gguf_context * ctx);
+```
+
+### Writing files
+
+There are three ways to write a GGUF file:
+
+<Tabs>
+  <Tab title="Single pass">
+    Write everything in one call:
+
+    ```c
+    // Write the entire context to a binary file.
+    // Pass only_meta = false to include tensor data.
+    bool gguf_write_to_file(
+        const struct gguf_context * ctx,
+        const char * fname,
+        bool only_meta
+    );
+    ```
+  </Tab>
+  <Tab title="Metadata then data">
+    Write metadata first, then append tensor data:
+
+    ```c
+    gguf_write_to_file(ctx, fname, /*only_meta =*/ true);
+    FILE * f = fopen(fname, "ab");
+    fwrite(tensor_data, ...); // append tensor data
+    fclose(f);
+    ```
+  </Tab>
+  <Tab title="Data then metadata">
+    Reserve space for metadata, write data, then fill in the header:
+
+    ```c
+    FILE * f = fopen(fname, "wb");
+    const size_t size_meta = gguf_get_meta_size(ctx);
+    fseek(f, size_meta, SEEK_SET);
+    fwrite(tensor_data, ...);      // write tensor data first
+    void * data = malloc(size_meta);
+    gguf_get_meta_data(ctx, data); // serialise header into buffer
+    rewind(f);
+    fwrite(data, 1, size_meta, f); // write header
+    free(data);
+    fclose(f);
+    ```
+  </Tab>
+</Tabs>
+
+### Reading key-value metadata
+
+```c
+// Number of KV pairs.
+int64_t gguf_get_n_kv(const struct gguf_context * ctx);
+
+// Find a key by name; returns -1 if not found.
+int64_t gguf_find_key(const struct gguf_context * ctx, const char * key);
+
+// Get the string key for a given key_id.
+const char * gguf_get_key(const struct gguf_context * ctx, int64_t key_id);
+
+// Get the type of a KV pair.
+enum gguf_type gguf_get_kv_type(const struct gguf_context * ctx, int64_t key_id);
+
+// Type-specific value accessors (will abort if the wrong type is used).
+uint8_t      gguf_get_val_u8  (const struct gguf_context * ctx, int64_t key_id);
+int8_t       gguf_get_val_i8  (const struct gguf_context * ctx, int64_t key_id);
+uint16_t     gguf_get_val_u16 (const struct gguf_context * ctx, int64_t key_id);
+int16_t      gguf_get_val_i16 (const struct gguf_context * ctx, int64_t key_id);
+uint32_t     gguf_get_val_u32 (const struct gguf_context * ctx, int64_t key_id);
+int32_t      gguf_get_val_i32 (const struct gguf_context * ctx, int64_t key_id);
+float        gguf_get_val_f32 (const struct gguf_context * ctx, int64_t key_id);
+uint64_t     gguf_get_val_u64 (const struct gguf_context * ctx, int64_t key_id);
+int64_t      gguf_get_val_i64 (const struct gguf_context * ctx, int64_t key_id);
+double       gguf_get_val_f64 (const struct gguf_context * ctx, int64_t key_id);
+bool         gguf_get_val_bool(const struct gguf_context * ctx, int64_t key_id);
+const char * gguf_get_val_str (const struct gguf_context * ctx, int64_t key_id);
+```
+
+### Writing key-value metadata
+
+```c
+// Add or overwrite a KV pair. The new pair is always appended.
+void gguf_set_val_u8  (struct gguf_context * ctx, const char * key, uint8_t      val);
+void gguf_set_val_i8  (struct gguf_context * ctx, const char * key, int8_t       val);
+void gguf_set_val_u16 (struct gguf_context * ctx, const char * key, uint16_t     val);
+void gguf_set_val_i16 (struct gguf_context * ctx, const char * key, int16_t      val);
+void gguf_set_val_u32 (struct gguf_context * ctx, const char * key, uint32_t     val);
+void gguf_set_val_i32 (struct gguf_context * ctx, const char * key, int32_t      val);
+void gguf_set_val_f32 (struct gguf_context * ctx, const char * key, float        val);
+void gguf_set_val_u64 (struct gguf_context * ctx, const char * key, uint64_t     val);
+void gguf_set_val_i64 (struct gguf_context * ctx, const char * key, int64_t      val);
+void gguf_set_val_f64 (struct gguf_context * ctx, const char * key, double       val);
+void gguf_set_val_bool(struct gguf_context * ctx, const char * key, bool         val);
+void gguf_set_val_str (struct gguf_context * ctx, const char * key, const char * val);
+
+// Array variants.
+void gguf_set_arr_data(struct gguf_context * ctx, const char * key,
+                       enum gguf_type type, const void * data, size_t n);
+void gguf_set_arr_str (struct gguf_context * ctx, const char * key,
+                       const char ** data, size_t n);
+
+// Remove a key (returns its former id, or -1 if not found).
+int64_t gguf_remove_key(struct gguf_context * ctx, const char * key);
+```
+
+### Working with tensors
+
+```c
+// Query tensor count and look up tensors by name or index.
+int64_t        gguf_get_n_tensors    (const struct gguf_context * ctx);
+int64_t        gguf_find_tensor      (const struct gguf_context * ctx, const char * name);
+size_t         gguf_get_tensor_offset(const struct gguf_context * ctx, int64_t tensor_id);
+const char *   gguf_get_tensor_name  (const struct gguf_context * ctx, int64_t tensor_id);
+enum ggml_type gguf_get_tensor_type  (const struct gguf_context * ctx, int64_t tensor_id);
+size_t         gguf_get_tensor_size  (const struct gguf_context * ctx, int64_t tensor_id);
+
+// Add a tensor (name must be unique).
+void gguf_add_tensor(struct gguf_context * ctx, const struct ggml_tensor * tensor);
+
+// Update a tensor's type and data.
+void gguf_set_tensor_type(struct gguf_context * ctx, const char * name, enum ggml_type type);
+void gguf_set_tensor_data(struct gguf_context * ctx, const char * name, const void * data);
+```
+
+## Standardized metadata keys
+
+### Required keys
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `general.architecture` | `string` | Architecture identifier, e.g. `llama`, `gpt2`, `falcon`. Lowercase `[a-z0-9]+` only. |
+| `general.quantization_version` | `uint32` | Required when any tensors are quantized. |
+| `general.alignment` | `uint32` | Global alignment in bytes (must be a multiple of 8). Defaults to `32`. |
+
+### General metadata
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `general.name` | `string` | Human-readable model name. |
+| `general.author` | `string` | Author of the model. |
+| `general.version` | `string` | Model version string. |
+| `general.description` | `string` | Free-form description. |
+| `general.license` | `string` | SPDX license expression, e.g. `MIT OR Apache-2.0`. |
+| `general.tags` | `string[]` | Search terms. |
+| `general.languages` | `string[]` | ISO 639 two-letter language codes. |
+| `general.file_type` | `uint32` | Enumerated type of the majority of tensors. |
+
+### LLM hyperparameters
+
+For LLM architectures, replace `[llm]` with the architecture name (e.g. `llama`, `gpt2`):
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `[llm].context_length` | `uint64` | Maximum context length in tokens. |
+| `[llm].embedding_length` | `uint64` | Embedding dimension (`n_embd`). |
+| `[llm].block_count` | `uint64` | Number of transformer blocks. |
+| `[llm].feed_forward_length` | `uint64` | Feed-forward layer size (`n_ff`). |
+| `[llm].attention.head_count` | `uint64` | Number of attention heads. |
+| `[llm].attention.head_count_kv` | `uint64` | KV heads for grouped-query attention. |
+| `[llm].rope.dimension_count` | `uint64` | Rotary embedding dimensions. |
+| `[llm].rope.freq_base` | `float32` | Base frequency for RoPE. |
+
+### Tokenizer
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `tokenizer.ggml.model` | `string` | Tokenizer type: `llama`, `gpt2`, `replit`, `rwkv`. |
+| `tokenizer.ggml.tokens` | `string[]` | Token list indexed by token ID. |
+| `tokenizer.ggml.scores` | `float32[]` | Per-token scores/probabilities. |
+| `tokenizer.ggml.merges` | `string[]` | BPE merge rules. |
+| `tokenizer.ggml.bos_token_id` | `uint32` | Beginning-of-sequence token ID. |
+| `tokenizer.ggml.eos_token_id` | `uint32` | End-of-sequence token ID. |
+| `tokenizer.chat_template` | `string` | Jinja template for prompt formatting. |
+
+## Naming convention
+
+GGUF filenames follow this structure:
+
+```
+<BaseName>-<SizeLabel>-<FineTune>-<Version>-<Encoding>-<Type>-<Shard>.gguf
+```
+
+All components are separated by `-`. Components other than `BaseName`, `SizeLabel`, and `Version` are optional.
+
+| Component | Description | Example |
+|-----------|-------------|----------|
+| `BaseName` | Model architecture or family name | `Llama-3`, `Mixtral` |
+| `SizeLabel` | Parameter count with scale prefix (`K`, `M`, `B`, `T`) | `8B`, `8x7B`, `3.8B` |
+| `FineTune` | Fine-tuning goal | `Instruct`, `Chat` |
+| `Version` | Format `v<Major>.<Minor>` (default `v1.0`) | `v0.1`, `v2.0` |
+| `Encoding` | Weight quantization scheme | `F16`, `Q4_0`, `Q5_K` |
+| `Type` | File purpose: `LoRA` or `vocab`; omit for standard model files | `LoRA` |
+| `Shard` | `<NNNNN>-of-<TOTAL>`, 5-digit zero-padded | `00001-of-00003` |
+
+<Tip>
+At minimum, a filename should include `BaseName`, `SizeLabel`, and `Version` so that it can be validated unambiguously.
+</Tip>
+
+### Examples
+
+| Filename | BaseName | SizeLabel | Version | Encoding | Shard |
+|----------|----------|-----------|---------|----------|---------|
+| `Mixtral-8x7B-v0.1-KQ2.gguf` | `Mixtral` | `8x7B` | `v0.1` | `KQ2` | — |
+| `Hermes-2-Pro-Llama-3-8B-F16.gguf` | `Hermes-2-Pro-Llama-3` | `8B` | `v1.0` | `F16` | — |
+| `Grok-100B-v1.0-Q4_0-00003-of-00009.gguf` | `Grok` | `100B` | `v1.0` | `Q4_0` | `00003-of-00009` |
+
+### Validation regex
+
+You can validate a filename with the following regular expression:
+
+```
+^(?<BaseName>[A-Za-z0-9\s]*(?:(?:-(?:(?:[A-Za-z\s][A-Za-z0-9\s]*)|(?:[0-9\s]*)))*))\-(?:(?<SizeLabel>(?:\d+x)?(?:\d+\.)?\d+[A-Za-z](?:-[A-Za-z]+(\d+\.)?\d+[A-Za-z]+)?)(?:-(?<FineTune>[A-Za-z0-9\s-]+))?)?-(?:(?<Version>v\d+(?:\.\d+)*))(?:-(?<Encoding>(?!LoRA|vocab)[\w_]+))?(?:-(?<Type>LoRA|vocab))?(?:-(?<Shard>\d{5}-of-\d{5}))?\.gguf$
+```
+
+## Standardized tensor names
+
+Models using the transformer architecture should use these tensor name conventions:
+
+**Base layers** — `AA.weight` / `AA.bias` where `AA` is:
+
+| Name | Layer |
+|------|-------|
+| `token_embd` | Token embedding |
+| `pos_embd` | Position embedding |
+| `output_norm` | Output normalization |
+| `output` | Output projection |
+
+**Attention and feed-forward blocks** — `blk.N.BB.weight` / `blk.N.BB.bias` where `N` is the block index and `BB` is:
+
+| Name | Layer |
+|------|-------|
+| `attn_norm` | Attention normalization |
+| `attn_q` | Query projection |
+| `attn_k` | Key projection |
+| `attn_v` | Value projection |
+| `attn_qkv` | Fused QKV projection |
+| `attn_output` | Attention output |
+| `ffn_norm` | Feed-forward normalization |
+| `ffn_up` | FFN up-projection |
+| `ffn_gate` | FFN gate |
+| `ffn_down` | FFN down-projection |
+
+## Version history
+
+| Version | Changes |
+|---------|---------|
+| v1 | Initial version. |
+| v2 | Most countable fields changed from `uint32` to `uint64` for larger model support. |
+| v3 | Added big-endian support. |

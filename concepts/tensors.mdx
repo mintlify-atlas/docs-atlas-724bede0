@@ -1,0 +1,222 @@
+---
+title: "Tensors"
+description: "The fundamental data structure in ggml: n-dimensional arrays with explicit type, shape, and stride information."
+---
+
+Every computation in ggml operates on tensors. A tensor is a typed, multi-dimensional array backed by a contiguous (or strided) memory region. ggml supports up to 4 dimensions and a wide range of numeric types, from 32-bit floats down to sub-4-bit quantized formats.
+
+## The `ggml_tensor` struct
+
+The core data structure is defined in `ggml.h`:
+
+```c
+struct ggml_tensor {
+    enum ggml_type type;
+
+    struct ggml_backend_buffer * buffer;
+
+    int64_t ne[GGML_MAX_DIMS]; // number of elements per dimension
+    size_t  nb[GGML_MAX_DIMS]; // stride in bytes per dimension:
+                               // nb[0] = ggml_type_size(type)
+                               // nb[1] = nb[0] * (ne[0] / ggml_blck_size(type)) + padding
+                               // nb[i] = nb[i-1] * ne[i-1]
+
+    enum ggml_op op;           // the operation that produced this tensor
+    int32_t      flags;        // GGML_TENSOR_FLAG_INPUT, _OUTPUT, _PARAM, ...
+
+    struct ggml_tensor * src[GGML_MAX_SRC]; // source (input) tensors
+
+    struct ggml_tensor * view_src;  // non-NULL when this tensor is a view
+    size_t               view_offs;
+
+    void * data;               // raw data pointer
+    char   name[GGML_MAX_NAME];
+};
+```
+
+`GGML_MAX_DIMS` is 4, so every tensor is at most 4-dimensional. `ne[0]` is the innermost (fastest-varying) dimension — the number of columns in a matrix.
+
+## Data types
+
+`ggml_type` covers floating-point formats, integer formats, and a large family of quantized types:
+
+```c
+enum ggml_type {
+    // Full-precision floats
+    GGML_TYPE_F32  = 0,
+    GGML_TYPE_F16  = 1,
+    GGML_TYPE_BF16 = 30,
+    GGML_TYPE_F64  = 28,
+
+    // Integer types
+    GGML_TYPE_I8   = 24,
+    GGML_TYPE_I16  = 25,
+    GGML_TYPE_I32  = 26,
+    GGML_TYPE_I64  = 27,
+
+    // Legacy k-quants (block-quantized)
+    GGML_TYPE_Q4_0 = 2,  GGML_TYPE_Q4_1 = 3,
+    GGML_TYPE_Q5_0 = 6,  GGML_TYPE_Q5_1 = 7,
+    GGML_TYPE_Q8_0 = 8,
+
+    // K-quants
+    GGML_TYPE_Q2_K = 10, GGML_TYPE_Q3_K = 11,
+    GGML_TYPE_Q4_K = 12, GGML_TYPE_Q5_K = 13,
+    GGML_TYPE_Q6_K = 14, GGML_TYPE_Q8_K = 15,
+
+    // i-quants
+    GGML_TYPE_IQ1_S   = 19, GGML_TYPE_IQ1_M   = 29,
+    GGML_TYPE_IQ2_XXS = 16, GGML_TYPE_IQ2_XS  = 17,
+    GGML_TYPE_IQ2_S   = 22, GGML_TYPE_IQ3_XXS = 18,
+    GGML_TYPE_IQ3_S   = 21, GGML_TYPE_IQ4_NL  = 20,
+    GGML_TYPE_IQ4_XS  = 23,
+
+    GGML_TYPE_COUNT = 41,
+};
+```
+
+Use `ggml_type_name(type)` to get a human-readable string, and `ggml_is_quantized(type)` to test whether a type uses block quantization.
+
+## Creating tensors
+
+Tensors are always allocated from a `ggml_context`. The context owns a fixed-size memory buffer; every tensor carves out space from it.
+
+```c
+// 1-D vector of 128 floats
+struct ggml_tensor * v = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 128);
+
+// 2-D matrix: 4 columns × 3 rows (ne[0]=4, ne[1]=3)
+struct ggml_tensor * m = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, 3);
+
+// 3-D tensor
+struct ggml_tensor * t = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 64, 32, 8);
+
+// 4-D tensor
+struct ggml_tensor * q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 64, 32, 8, 2);
+```
+
+<Note>
+Dimension ordering follows column-major convention: `ne[0]` is the number of elements in the fastest-varying (innermost) dimension. For a matrix, `ne[0]` is columns and `ne[1]` is rows.
+</Note>
+
+You can also use the generic allocator when the rank is determined at runtime:
+
+```c
+int64_t dims[] = {64, 32, 8, 2};
+struct ggml_tensor * t = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, dims);
+```
+
+## Reading and writing values
+
+For CPU-resident tensors the scalar helpers from `ggml-cpu.h` are the safest way to access individual elements:
+
+```c
+#include "ggml-cpu.h"
+
+// Fill every element with a constant
+ggml_set_f32(tensor, 1.0f);
+
+// Read / write by flat index
+float val = ggml_get_f32_1d(tensor, 42);
+ggml_set_f32_1d(tensor, 42, 3.14f);
+
+// Read / write by n-d coordinates
+float v = ggml_get_f32_nd(tensor, col, row, slice, batch);
+ggml_set_f32_nd(tensor, col, row, slice, batch, v);
+```
+
+For bulk initialization you can write directly through `tensor->data` using the stride fields:
+
+```c
+const int nx = 2;
+const int ny = 3;
+
+struct ggml_tensor * a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, nx, ny);
+
+for (int y = 0; y < ny; y++) {
+    for (int x = 0; x < nx; x++) {
+        *(float *)((char *)a->data + y*a->nb[1] + x*a->nb[0]) = x + y;
+    }
+}
+```
+
+Or copy an existing array in one call:
+
+```c
+float src[rows_A * cols_A] = { 2, 8, 5, 1, 4, 2, 8, 6 };
+
+struct ggml_tensor * a = ggml_new_tensor_2d(
+    model.ctx, GGML_TYPE_F32, cols_A, rows_A);
+
+memcpy(a->data, src, ggml_nbytes(a));
+```
+
+## Tensor metadata
+
+Each tensor carries metadata that describes how it was produced:
+
+| Field | Description |
+|-------|-------------|
+| `type` | Element type (F32, Q4_K, …) |
+| `ne[4]` | Number of elements per dimension |
+| `nb[4]` | Stride in bytes per dimension |
+| `op` | Operation that produced this tensor (`GGML_OP_ADD`, etc.) |
+| `src[GGML_MAX_SRC]` | Pointers to the input tensors of `op` |
+| `data` | Raw data pointer |
+| `name[GGML_MAX_NAME]` | Optional debug name |
+| `flags` | Input / output / param / loss flags |
+
+The `src` array lets you walk the computation graph upward:
+
+```c
+struct ggml_tensor * c = ggml_add(ctx, a, b);
+
+assert(c->src[0] == a);
+assert(c->src[1] == b);
+```
+
+Name a tensor for easier debugging:
+
+```c
+ggml_set_name(tensor, "weights");
+// or with printf-style formatting:
+ggml_format_name(tensor, "layer_%d_weight", layer_idx);
+```
+
+## Contiguous vs strided tensors
+
+ggml supports non-contiguous tensors produced by operations such as `ggml_transpose`, `ggml_permute`, and `ggml_view_*`. A tensor is contiguous when its elements are laid out in memory with no gaps and in the expected order.
+
+```c
+bool ok = ggml_is_contiguous(tensor);
+```
+
+Related predicates:
+
+```c
+bool ggml_is_transposed(const struct ggml_tensor * tensor);
+bool ggml_is_permuted  (const struct ggml_tensor * tensor);
+bool ggml_is_contiguous_1(const struct ggml_tensor * tensor); // contiguous for dims >= 1
+bool ggml_is_contiguous_2(const struct ggml_tensor * tensor); // contiguous for dims >= 2
+```
+
+All ggml operations are written to respect `nb` strides and do not assume contiguity. If you need a contiguous copy for an external library, call `ggml_cont`:
+
+```c
+struct ggml_tensor * t_cont = ggml_cont(ctx, t_strided);
+```
+
+## Utility functions
+
+```c
+int64_t ggml_nelements(const struct ggml_tensor * tensor);  // total element count
+int64_t ggml_nrows    (const struct ggml_tensor * tensor);  // ne[1] * ne[2] * ne[3]
+size_t  ggml_nbytes   (const struct ggml_tensor * tensor);  // total byte size
+
+size_t  ggml_type_size(enum ggml_type type);   // bytes per block
+int64_t ggml_blck_size(enum ggml_type type);   // elements per block
+size_t  ggml_row_size (enum ggml_type type, int64_t ne);
+
+const char * ggml_type_name(enum ggml_type type);
+bool         ggml_is_quantized(enum ggml_type type);
+```

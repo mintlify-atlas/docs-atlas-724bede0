@@ -1,0 +1,292 @@
+---
+title: "Allocator API"
+description: "Memory allocation for tensors and computation graphs"
+---
+
+ggml provides two complementary allocators:
+
+- **`ggml_tallocr`** (tensor allocator) — a simple linear allocator that assigns a single tensor into a pre-existing buffer.
+- **`ggml_gallocr`** (graph allocator) — a smart allocator that analyses a full computation graph, reuses intermediate memory where possible, and allocates all tensors in a single pass.
+
+For most use cases, prefer `ggml_gallocr`. Use `ggml_tallocr` only when you need precise, manual control over individual tensor placement.
+
+## Tensor allocator (ggml_tallocr)
+
+`ggml_tallocr` is a lightweight linear allocator backed by a single backend buffer.
+
+```c
+struct ggml_tallocr {
+    ggml_backend_buffer_t buffer;    // backing buffer
+    void                * base;      // base pointer of the buffer
+    size_t                alignment; // alignment requirement
+    size_t                offset;    // current allocation offset
+};
+```
+
+<AccordionGroup>
+  <Accordion title="ggml_tallocr_new">
+    Creates a tensor allocator backed by an existing buffer.
+
+    ```c
+    struct ggml_tallocr ggml_tallocr_new(ggml_backend_buffer_t buffer);
+    ```
+
+    <ParamField path="buffer" type="ggml_backend_buffer_t" required>
+      An already-allocated backend buffer. The allocator does not take ownership — you are still responsible for freeing the buffer.
+    </ParamField>
+
+    Returns a value-type `ggml_tallocr` struct. No heap allocation is made by this call.
+  </Accordion>
+
+  <Accordion title="ggml_tallocr_alloc">
+    Allocates space for a single tensor within the allocator's buffer.
+
+    ```c
+    enum ggml_status ggml_tallocr_alloc(
+        struct ggml_tallocr * talloc,
+        struct ggml_tensor  * tensor);
+    ```
+
+    <ParamField path="talloc" type="struct ggml_tallocr *" required>
+      The allocator to use.
+    </ParamField>
+    <ParamField path="tensor" type="struct ggml_tensor *" required>
+      The tensor whose `data` pointer will be set to the allocated region.
+    </ParamField>
+
+    Returns `GGML_STATUS_SUCCESS` on success, or an error code if the buffer is exhausted.
+  </Accordion>
+</AccordionGroup>
+
+## Graph allocator (ggml_gallocr)
+
+`ggml_gallocr` inspects the full computation graph, identifies tensors whose lifetimes do not overlap, and reuses memory between them. This significantly reduces peak memory usage compared to allocating each tensor independently.
+
+```c
+typedef struct ggml_gallocr * ggml_gallocr_t;
+```
+
+### Special tensor flags
+
+Two flags influence graph allocator behaviour:
+
+- **`ggml_set_input(tensor)`** — input tensors are placed at non-overlapping addresses at the start of the graph so they remain valid throughout execution.
+- **`ggml_set_output(tensor)`** — output tensors are never freed or overwritten, ensuring their data is readable after `ggml_gallocr_alloc_graph` returns.
+
+### Quick start
+
+```c
+// 1. Create a graph allocator for the CPU
+ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
+
+// 2. (Optional) Reserve with a worst-case graph to avoid reallocations later
+ggml_gallocr_reserve(galloc, build_graph(max_batch));
+
+// 3. Allocate a concrete graph
+struct ggml_cgraph * graph = build_graph(batch);
+ggml_gallocr_alloc_graph(galloc, graph);
+
+printf("compute buffer: %zu bytes\n", ggml_gallocr_get_buffer_size(galloc, 0));
+
+// 4. Execute
+ggml_backend_graph_compute(backend, graph);
+
+ggml_gallocr_free(galloc);
+```
+
+<AccordionGroup>
+  <Accordion title="ggml_gallocr_new">
+    Creates a graph allocator that uses a single buffer type for all tensors.
+
+    ```c
+    ggml_gallocr_t ggml_gallocr_new(ggml_backend_buffer_type_t buft);
+    ```
+
+    <ParamField path="buft" type="ggml_backend_buffer_type_t" required>
+      The buffer type to allocate from. Use `ggml_backend_cpu_buffer_type()` for CPU execution, or a device-specific type for GPU execution.
+    </ParamField>
+
+    Free with `ggml_gallocr_free`.
+  </Accordion>
+
+  <Accordion title="ggml_gallocr_new_n">
+    Creates a graph allocator that can use multiple buffer types simultaneously — useful for multi-device graphs.
+
+    ```c
+    ggml_gallocr_t ggml_gallocr_new_n(
+        ggml_backend_buffer_type_t * bufts,
+        int                          n_bufs);
+    ```
+
+    <ParamField path="bufts" type="ggml_backend_buffer_type_t *" required>
+      Array of buffer types, one per logical buffer region.
+    </ParamField>
+    <ParamField path="n_bufs" type="int" required>
+      Number of buffer types in the array.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_gallocr_free">
+    Frees the graph allocator and all buffers it owns.
+
+    ```c
+    void ggml_gallocr_free(ggml_gallocr_t galloc);
+    ```
+
+    <ParamField path="galloc" type="ggml_gallocr_t" required>
+      The allocator to free.
+    </ParamField>
+  </Accordion>
+</AccordionGroup>
+
+### Reservation
+
+Calling `ggml_gallocr_reserve` with a worst-case graph pre-sizes all internal buffers. This avoids reallocation during the hot path and gives you a stable buffer size measurement.
+
+<Note>
+Reservation is optional for single-buffer allocators: `ggml_gallocr_alloc_graph` will reallocate automatically if the graph topology changes. For multi-buffer allocators, you **must** call `ggml_gallocr_reserve_n` before the topology changes, or `ggml_gallocr_alloc_graph` will return `false`.
+</Note>
+
+<AccordionGroup>
+  <Accordion title="ggml_gallocr_reserve">
+    Pre-allocates internal buffers to fit the given graph without modifying any tensor data pointers.
+
+    ```c
+    bool ggml_gallocr_reserve(
+        ggml_gallocr_t       galloc,
+        struct ggml_cgraph * graph);
+    ```
+
+    <ParamField path="galloc" type="ggml_gallocr_t" required>
+      The allocator to configure.
+    </ParamField>
+    <ParamField path="graph" type="struct ggml_cgraph *" required>
+      A representative (ideally worst-case) computation graph.
+    </ParamField>
+
+    Returns `true` on success. Returns `false` if the underlying buffer allocation failed.
+  </Accordion>
+
+  <Accordion title="ggml_gallocr_reserve_n">
+    Like `ggml_gallocr_reserve`, but also specifies which buffer index each node and leaf tensor should be placed in.
+
+    ```c
+    bool ggml_gallocr_reserve_n(
+        ggml_gallocr_t       galloc,
+        struct ggml_cgraph * graph,
+        const int          * node_buffer_ids,
+        const int          * leaf_buffer_ids);
+    ```
+
+    <ParamField path="galloc" type="ggml_gallocr_t" required>
+      The allocator to configure.
+    </ParamField>
+    <ParamField path="graph" type="struct ggml_cgraph *" required>
+      The representative computation graph.
+    </ParamField>
+    <ParamField path="node_buffer_ids" type="const int *" required>
+      Array of buffer indices (one per node in the graph). Index `i` controls which buffer the `i`-th graph node is allocated from.
+    </ParamField>
+    <ParamField path="leaf_buffer_ids" type="const int *" required>
+      Array of buffer indices (one per leaf tensor in the graph).
+    </ParamField>
+  </Accordion>
+</AccordionGroup>
+
+### Allocation and sizing
+
+<AccordionGroup>
+  <Accordion title="ggml_gallocr_alloc_graph">
+    Allocates all tensors in the graph, reusing memory between tensors whose lifetimes do not overlap.
+
+    ```c
+    bool ggml_gallocr_alloc_graph(
+        ggml_gallocr_t       galloc,
+        struct ggml_cgraph * graph);
+    ```
+
+    <ParamField path="galloc" type="ggml_gallocr_t" required>
+      The allocator to use.
+    </ParamField>
+    <ParamField path="graph" type="struct ggml_cgraph *" required>
+      The computation graph whose tensors will be allocated.
+    </ParamField>
+
+    Returns `true` on success. For single-buffer allocators, the backing buffer is reallocated automatically if the graph topology changed since the last call. For multi-buffer allocators, returns `false` instead — call `ggml_gallocr_reserve_n` first.
+  </Accordion>
+
+  <Accordion title="ggml_gallocr_get_buffer_size">
+    Returns the size of the backing buffer for a given buffer index after allocation.
+
+    ```c
+    size_t ggml_gallocr_get_buffer_size(
+        ggml_gallocr_t galloc,
+        int            buffer_id);
+    ```
+
+    <ParamField path="galloc" type="ggml_gallocr_t" required>
+      The allocator to query.
+    </ParamField>
+    <ParamField path="buffer_id" type="int" required>
+      Zero-based buffer index. For single-buffer allocators, always pass `0`.
+    </ParamField>
+
+    Returns the size in bytes, or `0` if no buffer has been allocated yet.
+  </Accordion>
+</AccordionGroup>
+
+## Utility functions
+
+These helpers allocate all tensors in a `ggml_context` into a single backend buffer in one call. They are the simplest way to prepare model weights for inference.
+
+<AccordionGroup>
+  <Accordion title="ggml_backend_alloc_ctx_tensors_from_buft">
+    Allocates all tensors in the context into a new buffer of the given type.
+
+    ```c
+    struct ggml_backend_buffer * ggml_backend_alloc_ctx_tensors_from_buft(
+        struct ggml_context        * ctx,
+        ggml_backend_buffer_type_t   buft);
+    ```
+
+    <ParamField path="ctx" type="struct ggml_context *" required>
+      The context whose tensors should be allocated. The context must have been created with `no_alloc = true`.
+    </ParamField>
+    <ParamField path="buft" type="ggml_backend_buffer_type_t" required>
+      The buffer type to allocate from.
+    </ParamField>
+
+    Returns the allocated buffer. The caller is responsible for freeing it with `ggml_backend_buffer_free`.
+  </Accordion>
+
+  <Accordion title="ggml_backend_alloc_ctx_tensors">
+    Allocates all tensors in the context using the backend's default buffer type.
+
+    ```c
+    struct ggml_backend_buffer * ggml_backend_alloc_ctx_tensors(
+        struct ggml_context * ctx,
+        ggml_backend_t        backend);
+    ```
+
+    <ParamField path="ctx" type="struct ggml_context *" required>
+      The context whose tensors should be allocated.
+    </ParamField>
+    <ParamField path="backend" type="ggml_backend_t" required>
+      The backend whose default buffer type will be used.
+    </ParamField>
+
+    Equivalent to `ggml_backend_alloc_ctx_tensors_from_buft(ctx, ggml_backend_get_default_buffer_type(backend))`.
+  </Accordion>
+</AccordionGroup>
+
+## When to use gallocr vs tallocr
+
+| | `ggml_gallocr` | `ggml_tallocr` |
+|---|---|---|
+| **Best for** | Full computation graphs | Individual tensors |
+| **Memory reuse** | Yes — overlapping lifetimes share memory | No — each tensor gets its own region |
+| **Usage** | Call `alloc_graph` once per graph | Call `alloc` once per tensor |
+| **Multi-device** | Yes (via `new_n`) | No |
+| **Overhead** | Analyses graph topology | Minimal |
+
+Use `ggml_gallocr` whenever you have a `ggml_cgraph`. Use `ggml_tallocr` for one-off allocations where you already have a buffer and want to place a single tensor at a known offset.

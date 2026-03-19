@@ -1,0 +1,113 @@
+---
+title: "Vulkan backend"
+description: "Cross-vendor GPU acceleration for Linux, Windows, and Android"
+---
+
+The Vulkan backend runs tensor operations on any GPU with a Vulkan 1.2+ driver. It covers NVIDIA, AMD, Intel, Qualcomm, and ARM Mali GPUs on Linux, Windows, and Android — making it the most portable GPU backend.
+
+## Requirements
+
+- Vulkan 1.2 capable GPU and driver
+- Vulkan SDK (for building from source)
+- Linux, Windows, or Android
+
+## Build
+
+```bash
+cmake -B build -DGGML_VULKAN=ON
+cmake --build build
+```
+
+Useful CMake options:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `GGML_VULKAN=ON` | OFF | Enable the Vulkan backend |
+| `GGML_VULKAN_DEBUG=ON` | OFF | Enable Vulkan validation layers and debug output |
+| `GGML_VULKAN_MEMORY_DEBUG=ON` | OFF | Print memory allocation details |
+| `GGML_VULKAN_SHADER_DEBUG_INFO=ON` | OFF | Include shader debug information |
+
+<Note>
+  Install the Vulkan SDK from [lunarg.com/vulkan-sdk](https://www.lunarg.com/vulkan-sdk/) on Linux and Windows. On Android, the Vulkan driver is provided by the device vendor.
+</Note>
+
+## Initialization
+
+```c
+#include "ggml-vulkan.h"
+
+// Initialize on Vulkan device 0
+ggml_backend_t backend = ggml_backend_vk_init(0);
+if (!backend) {
+    fprintf(stderr, "failed to initialize Vulkan backend\n");
+    return 1;
+}
+```
+
+## Device enumeration
+
+Enumerate all available Vulkan devices before selecting one:
+
+```c
+int n = ggml_backend_vk_get_device_count();
+for (int i = 0; i < n; i++) {
+    char desc[256];
+    size_t free, total;
+    ggml_backend_vk_get_device_description(i, desc, sizeof(desc));
+    ggml_backend_vk_get_device_memory(i, &free, &total);
+    printf("device %zu: %s — %.1f / %.1f GB free\n",
+           (size_t)i, desc, free / 1e9, total / 1e9);
+}
+
+// Use the first discrete GPU
+ggml_backend_t backend = ggml_backend_vk_init(0);
+```
+
+<Note>
+  The maximum number of Vulkan devices is `GGML_VK_MAX_DEVICES` (16).
+</Note>
+
+## Buffer types
+
+The Vulkan backend provides two buffer types:
+
+```c
+// GPU-local buffer (device memory)
+ggml_backend_buffer_type_t buft = ggml_backend_vk_buffer_type(device_index);
+
+// Pinned host buffer for faster CPU↔GPU transfers
+ggml_backend_buffer_type_t host_buft = ggml_backend_vk_host_buffer_type();
+```
+
+<Tip>
+  Use the host buffer type for input tensors that change every forward pass. Pinned memory avoids redundant copies through the Vulkan transfer queue.
+</Tip>
+
+## Using Vulkan with the scheduler
+
+Combine the Vulkan backend with a CPU fallback:
+
+```c
+ggml_backend_t vk  = ggml_backend_vk_init(0);
+ggml_backend_t cpu = ggml_backend_cpu_init();
+
+ggml_backend_t backends[2] = { vk, cpu };
+ggml_backend_sched_t sched = ggml_backend_sched_new(
+    backends, NULL, 2, GGML_DEFAULT_GRAPH_SIZE, false, true
+);
+```
+
+The scheduler assigns each graph node to the backend that supports it. Operations not yet implemented in Vulkan fall back to the CPU automatically.
+
+## API summary
+
+| Function | Description |
+|----------|-------------|
+| `ggml_backend_vk_init(dev_num)` | Create a Vulkan backend for the given device index |
+| `ggml_backend_is_vk(backend)` | Check whether a backend is the Vulkan backend |
+| `ggml_backend_vk_get_device_count()` | Number of available Vulkan devices |
+| `ggml_backend_vk_get_device_description(dev, buf, size)` | Human-readable device name |
+| `ggml_backend_vk_get_device_memory(dev, free, total)` | Available and total device memory |
+| `ggml_backend_vk_buffer_type(dev_num)` | Device-local buffer type |
+| `ggml_backend_vk_host_buffer_type()` | Pinned host memory buffer type |
+| `ggml_backend_vk_reg()` | Return the Vulkan backend registry entry |

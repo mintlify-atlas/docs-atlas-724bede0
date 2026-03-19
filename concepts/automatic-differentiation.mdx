@@ -1,0 +1,174 @@
+---
+title: "Automatic Differentiation"
+description: "ggml implements reverse-mode automatic differentiation so you can compute gradients with respect to any parameter tensor."
+---
+
+ggml supports automatic differentiation through reverse-mode (backpropagation). Every operation that has a differentiable implementation provides both a forward function and a backward function. The backward function computes the adjoint of each input tensor given the adjoint of the output.
+
+## How it works
+
+1. **Forward pass** — define the function and compute its value.
+2. **Backward pass** — ggml automatically builds gradient nodes that propagate the loss gradient back through every operation in the graph.
+3. **Read gradients** — retrieve the gradient tensor for any parameter after computation.
+
+## Marking trainable parameters
+
+Call `ggml_set_param` to mark a tensor as a trainable parameter. This sets `GGML_TENSOR_FLAG_PARAM` on the tensor and tells the autodiff engine to compute gradients for it.
+
+```c
+struct ggml_tensor * x = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+ggml_set_param(x);  // x is an input variable / trainable parameter
+```
+
+<Note>
+`ggml_set_param` does not allocate a gradient tensor immediately. Gradient storage is allocated when you call `ggml_build_backward_expand`.
+</Note>
+
+## Full example: f(x) = a·x² + b
+
+This example is taken directly from the `ggml.h` header comments.
+
+### Define the function
+
+```c
+struct ggml_init_params params = {
+    .mem_size   = 16*1024*1024,
+    .mem_buffer = NULL,
+};
+
+struct ggml_context * ctx = ggml_init(params);
+
+struct ggml_tensor * x = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+ggml_set_param(ctx, x);  // x is the variable we differentiate with respect to
+
+struct ggml_tensor * a  = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+struct ggml_tensor * b  = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+struct ggml_tensor * x2 = ggml_mul(ctx, x, x);
+struct ggml_tensor * f  = ggml_add(ctx, ggml_mul(ctx, a, x2), b);
+```
+
+### Build forward and backward graphs
+
+```c
+// Build the forward graph
+struct ggml_cgraph * gf = ggml_new_graph_custom(ctx, GGML_DEFAULT_GRAPH_SIZE, /*grads=*/true);
+ggml_build_forward_expand(gf, f);
+
+// Allocate gradient accumulator tensors and attach backward nodes
+struct ggml_tensor * grad_f = NULL; // NULL means use a scalar 1.0 seed
+ggml_build_backward_expand(ctx, gf, &grad_f);
+```
+
+### Set values and compute
+
+```c
+ggml_set_f32(x, 2.0f);
+ggml_set_f32(a, 3.0f);
+ggml_set_f32(b, 4.0f);
+
+// Reset gradient accumulators to zero before each backward pass
+ggml_graph_reset(gf);
+
+// Run both forward and backward passes
+ggml_graph_compute_with_ctx(ctx, gf, /*n_threads=*/1);
+```
+
+### Read gradients
+
+```c
+// f = a*x^2 + b  =>  df/dx = 2*a*x = 2*3*2 = 12
+struct ggml_tensor * grad_x = ggml_graph_get_grad(gf, x);
+printf("df/dx = %f\n", ggml_get_f32_1d(grad_x, 0));  // 12.0
+```
+
+## `ggml_build_backward_expand`
+
+```c
+void ggml_build_backward_expand(
+    struct ggml_context *  ctx,
+    struct ggml_cgraph  *  cgraph,
+    struct ggml_tensor  ** grad_accs);
+```
+
+- `ctx` — the context used to allocate gradient tensors
+- `cgraph` — a forward graph previously built with `ggml_build_forward_expand`; must have been created with `grads = true`
+- `grad_accs` — pointer to an array of gradient accumulator tensors (one per output); pass a pointer to `NULL` to use a default scalar-1 seed
+
+After this call, the graph contains both forward and backward nodes. Calling `ggml_graph_compute` will execute them in the correct order.
+
+## Accessing gradients
+
+```c
+// Gradient tensor for a node in the forward graph
+struct ggml_tensor * ggml_graph_get_grad(
+    const struct ggml_cgraph * cgraph,
+    const struct ggml_tensor * node);
+
+// Gradient accumulator (for gradient accumulation across multiple batches)
+struct ggml_tensor * ggml_graph_get_grad_acc(
+    const struct ggml_cgraph * cgraph,
+    const struct ggml_tensor * node);
+```
+
+<Warning>
+`ggml_graph_get_grad` returns `NULL` for tensors that are not reachable by any parameter in the graph (i.e., tensors where no gradient flows).
+</Warning>
+
+## Gradient accumulation
+
+ggml supports accumulating gradients across multiple forward/backward passes before applying an optimizer step — useful for simulating larger batch sizes.
+
+```c
+for (int step = 0; step < accumulation_steps; step++) {
+    // Load next mini-batch into input tensors
+    load_batch(inputs, step);
+
+    // Do NOT reset gradients between accumulation steps;
+    // call ggml_graph_reset only before the first step in an accumulation window.
+    if (step == 0) {
+        ggml_graph_reset(gf);
+    }
+
+    ggml_graph_compute_with_ctx(ctx, gf, n_threads);
+}
+
+// Now apply optimizer using the accumulated gradients
+struct ggml_tensor * grad = ggml_graph_get_grad_acc(gf, param);
+```
+
+`ggml_graph_reset` zeroes gradient accumulators and sets the loss gradient seed to 1.0. Call it once at the start of each accumulation window.
+
+## Loss tensors
+
+Mark the final scalar output as a loss to signal the optimizer:
+
+```c
+struct ggml_tensor * loss = ggml_cross_entropy_loss(ctx, logits, labels);
+ggml_set_loss(loss);  // sets GGML_TENSOR_FLAG_LOSS
+```
+
+Multiple loss tensors sum together. The backward pass seeds these tensors with gradient 1.0 automatically.
+
+## High-level training API
+
+For training workloads, `ggml-opt.h` provides a higher-level interface that manages forward/backward graph construction, gradient accumulation, and optimizer steps:
+
+```c
+#include "ggml-opt.h"
+
+ggml_opt_fit(
+    backend_sched,
+    ctx_compute,
+    inputs,
+    outputs,
+    dataset,
+    GGML_OPT_LOSS_TYPE_CROSS_ENTROPY,
+    GGML_OPT_OPTIMIZER_TYPE_ADAMW,
+    get_opt_pars,
+    /*nepoch=*/10,
+    /*nbatch_logical=*/256,
+    /*val_split=*/0.1f,
+    /*silent=*/false);
+```
+
+See `ggml-opt.h` for the full API.

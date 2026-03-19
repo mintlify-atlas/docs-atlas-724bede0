@@ -1,0 +1,149 @@
+---
+title: "CUDA backend"
+description: "NVIDIA GPU acceleration via CUDA, with multi-GPU and split-tensor support"
+---
+
+The CUDA backend offloads tensor operations to NVIDIA GPUs using CUDA kernels and cuBLAS. It also supports AMD GPUs via ROCm (HIP) and Moore Threads GPUs via MUSA, using the same API.
+
+## Requirements
+
+- NVIDIA GPU with CUDA Compute Capability 5.0 or later
+- CUDA Toolkit (nvcc, runtime libraries)
+- CMake 3.17+
+
+<Note>
+  When built with ROCm support (`GGML_HIP=ON`), the backend name becomes `"ROCm"` and cuBLAS is replaced by hipBLAS. The C API is identical.
+</Note>
+
+## Build
+
+```bash
+cmake -B build -DGGML_CUDA=ON
+cmake --build build
+```
+
+Useful CMake options:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `GGML_CUDA=ON` | OFF | Enable the CUDA backend |
+| `GGML_CUDA_F16=ON` | OFF | Use FP16 tensors in CUDA kernels |
+| `GGML_CUDA_NO_PEER_COPY=ON` | OFF | Disable direct GPU-to-GPU peer copies |
+| `CMAKE_CUDA_ARCHITECTURES` | auto | Target GPU architectures, e.g. `"89;90"` |
+
+## Initialization
+
+```c
+#include "ggml-cuda.h"
+
+// Initialize on CUDA device 0
+ggml_backend_t backend = ggml_backend_cuda_init(0);
+if (!backend) {
+    fprintf(stderr, "failed to initialize CUDA backend\n");
+    return 1;
+}
+```
+
+To select a device, you can enumerate available devices first:
+
+```c
+int n = ggml_backend_cuda_get_device_count();
+for (int i = 0; i < n; i++) {
+    char desc[256];
+    size_t free, total;
+    ggml_backend_cuda_get_device_description(i, desc, sizeof(desc));
+    ggml_backend_cuda_get_device_memory(i, &free, &total);
+    printf("device %d: %s — %.1f / %.1f GB free\n",
+           i, desc, free / 1e9, total / 1e9);
+}
+
+ggml_backend_t backend = ggml_backend_cuda_init(0);
+```
+
+## Buffer types
+
+The CUDA backend provides three buffer types:
+
+```c
+// Standard device buffer (VRAM)
+ggml_backend_buffer_type_t buft = ggml_backend_cuda_buffer_type(device);
+
+// Pinned host buffer — faster CPU↔GPU transfers
+ggml_backend_buffer_type_t host_buft = ggml_backend_cuda_host_buffer_type();
+
+// Split buffer — distributes tensor rows across multiple GPUs
+float tensor_split[4] = { 0.5f, 0.5f, 0.0f, 0.0f }; // 50/50 split across devices 0 and 1
+ggml_backend_buffer_type_t split_buft = ggml_backend_cuda_split_buffer_type(0, tensor_split);
+```
+
+<Tip>
+  Use the pinned host buffer type for tensors on the CPU side of a CPU/GPU pipeline. Pinned (page-locked) memory transfers to and from the GPU significantly faster than pageable memory.
+</Tip>
+
+## Multi-GPU setup
+
+To use more than one GPU, create a separate backend per device and pass them all to the scheduler:
+
+```c
+int n_devices = ggml_backend_cuda_get_device_count();
+
+ggml_backend_t backends[GGML_CUDA_MAX_DEVICES];
+for (int i = 0; i < n_devices; i++) {
+    backends[i] = ggml_backend_cuda_init(i);
+}
+
+// Add CPU as a fallback
+ggml_backend_t cpu = ggml_backend_cpu_init();
+backends[n_devices] = cpu;
+
+ggml_backend_sched_t sched = ggml_backend_sched_new(
+    backends, NULL, n_devices + 1, GGML_DEFAULT_GRAPH_SIZE, false, true
+);
+```
+
+For weight tensors spread across GPUs, allocate them into a split buffer:
+
+```c
+// Equal split across all devices
+float split[GGML_CUDA_MAX_DEVICES] = {0};
+for (int i = 0; i < n_devices; i++) split[i] = 1.0f / n_devices;
+
+ggml_backend_buffer_type_t split_buft =
+    ggml_backend_cuda_split_buffer_type(0, split);
+ggml_backend_buffer_t weights_buf =
+    ggml_backend_buft_alloc_buffer(split_buft, weights_size);
+```
+
+## Pinned host memory
+
+For faster host-side memory, register existing host buffers with the CUDA driver:
+
+```c
+void * host_ptr = malloc(buffer_size);
+ggml_backend_cuda_register_host_buffer(host_ptr, buffer_size);
+
+// ... use host_ptr with ggml_backend_tensor_set/get ...
+
+ggml_backend_cuda_unregister_host_buffer(host_ptr);
+free(host_ptr);
+```
+
+## API summary
+
+| Function | Description |
+|----------|-------------|
+| `ggml_backend_cuda_init(device)` | Create a CUDA backend for the given device index |
+| `ggml_backend_is_cuda(backend)` | Check whether a backend is a CUDA backend |
+| `ggml_backend_cuda_get_device_count()` | Number of available CUDA devices |
+| `ggml_backend_cuda_get_device_description(dev, buf, size)` | Human-readable device name |
+| `ggml_backend_cuda_get_device_memory(dev, free, total)` | Available and total VRAM in bytes |
+| `ggml_backend_cuda_buffer_type(device)` | VRAM buffer type for a device |
+| `ggml_backend_cuda_host_buffer_type()` | Pinned host memory buffer type |
+| `ggml_backend_cuda_split_buffer_type(main_dev, split)` | Row-split buffer across multiple GPUs |
+| `ggml_backend_cuda_register_host_buffer(ptr, size)` | Pin an existing host allocation |
+| `ggml_backend_cuda_unregister_host_buffer(ptr)` | Unpin a previously registered allocation |
+| `ggml_backend_cuda_reg()` | Return the CUDA backend registry entry |
+
+<Warning>
+  `GGML_CUDA_MAX_DEVICES` is 16. You cannot create backends for more than 16 CUDA devices in a single process.
+</Warning>

@@ -1,0 +1,843 @@
+---
+title: "Tensor Operations"
+description: "Complete reference for all ggml tensor operations"
+---
+
+All operations take a `struct ggml_context *` as their first argument and return a `struct ggml_tensor *` representing the result. Operations do **not** perform any computation — they record a node in the computation graph. Computation only happens when `ggml_graph_compute()` or `ggml_graph_compute_with_ctx()` is called.
+
+Most operations have an `_inplace` variant that writes results back into the first tensor operand, returning a view of it.
+
+<AccordionGroup>
+
+<Accordion title="Arithmetic">
+
+### `ggml_add`
+
+```c
+struct ggml_tensor * ggml_add(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    struct ggml_tensor  * b);
+```
+
+Element-wise addition `a + b`. `b` is broadcast to the shape of `a` when necessary.
+
+### `ggml_add1`
+
+```c
+struct ggml_tensor * ggml_add1(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    struct ggml_tensor  * b);
+```
+
+Adds the scalar value held in tensor `b` to every element of `a`.
+
+### `ggml_sub`
+
+```c
+struct ggml_tensor * ggml_sub(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    struct ggml_tensor  * b);
+```
+
+Element-wise subtraction `a - b`.
+
+### `ggml_mul`
+
+```c
+struct ggml_tensor * ggml_mul(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    struct ggml_tensor  * b);
+```
+
+Element-wise multiplication `a * b` (Hadamard product). `b` is broadcast to the shape of `a`.
+
+### `ggml_div`
+
+```c
+struct ggml_tensor * ggml_div(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    struct ggml_tensor  * b);
+```
+
+Element-wise division `a / b`.
+
+### `ggml_sqr`
+
+```c
+struct ggml_tensor * ggml_sqr(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a);
+```
+
+Element-wise square `a²`.
+
+### `ggml_sqrt`
+
+```c
+struct ggml_tensor * ggml_sqrt(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a);
+```
+
+Element-wise square root `√a`.
+
+### `ggml_abs`
+
+```c
+struct ggml_tensor * ggml_abs(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a);
+```
+
+Element-wise absolute value `|a|`.
+
+### `ggml_neg`
+
+```c
+struct ggml_tensor * ggml_neg(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a);
+```
+
+Element-wise negation `-a`.
+
+### `ggml_log`
+
+```c
+struct ggml_tensor * ggml_log(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a);
+```
+
+Element-wise natural logarithm `ln(a)`.
+
+### `ggml_exp`
+
+```c
+struct ggml_tensor * ggml_exp(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a);
+```
+
+Element-wise exponential `eᵃ`.
+
+### `ggml_sin` / `ggml_cos`
+
+```c
+struct ggml_tensor * ggml_sin(struct ggml_context * ctx, struct ggml_tensor * a);
+struct ggml_tensor * ggml_cos(struct ggml_context * ctx, struct ggml_tensor * a);
+```
+
+Element-wise trigonometric functions.
+
+### `ggml_scale`
+
+```c
+struct ggml_tensor * ggml_scale(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    float                 s);
+```
+
+Multiplies every element of `a` by the scalar `s`. Equivalent to `a * s`.
+
+### `ggml_clamp`
+
+```c
+struct ggml_tensor * ggml_clamp(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    float                 min,
+    float                 max);
+```
+
+Clamps every element of `a` to `[min, max]`. Operates in-place and returns a view of `a`.
+
+</Accordion>
+
+<Accordion title="Matrix operations">
+
+### `ggml_mul_mat`
+
+```c
+struct ggml_tensor * ggml_mul_mat(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    struct ggml_tensor  * b);
+```
+
+Matrix multiplication. `a` is the weight matrix (`k` columns, `n` rows) and `b` is the input (`k` columns, `m` rows — transposed internally). The result is `n` columns by `m` rows.
+
+- `a`: `[ne03, ne02, n, k]`  
+- `b`: `[ne03*x, ne02*y, m, k]`  
+- result: `[ne03*x, ne02*y, m, n]`
+
+`a` may be quantized; `b` must be `F32` or `F16`.
+
+### `ggml_mul_mat_set_prec`
+
+```c
+void ggml_mul_mat_set_prec(
+    struct ggml_tensor * a,
+    enum ggml_prec       prec);
+```
+
+Overrides the accumulation precision of a `ggml_mul_mat` result tensor. Set to `GGML_PREC_F32` for higher-precision accumulation (useful for models like Phi-2).
+
+### `ggml_mul_mat_id`
+
+```c
+struct ggml_tensor * ggml_mul_mat_id(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * as,
+    struct ggml_tensor  * b,
+    struct ggml_tensor  * ids);
+```
+
+Indirect matrix multiplication. Selects one of the weight matrices from `as` using the row indices in `ids`, then multiplies by `b`. Used in mixture-of-experts routing.
+
+### `ggml_out_prod`
+
+```c
+struct ggml_tensor * ggml_out_prod(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    struct ggml_tensor  * b);
+```
+
+Outer product. `a` is `[m, n]`, `b` is `[p, n]`, result is `[m, p]`.
+
+</Accordion>
+
+<Accordion title="Activation functions">
+
+### `ggml_relu`
+
+```c
+struct ggml_tensor * ggml_relu(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a);
+```
+
+Rectified linear unit: `max(0, a)` element-wise.
+
+### `ggml_leaky_relu`
+
+```c
+struct ggml_tensor * ggml_leaky_relu(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    float                 negative_slope,
+    bool                  inplace);
+```
+
+Leaky ReLU: `a >= 0 ? a : negative_slope * a`.
+
+### `ggml_gelu`
+
+```c
+struct ggml_tensor * ggml_gelu(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a);
+```
+
+Gaussian Error Linear Unit. Uses the standard approximation based on `tanh`.
+
+### `ggml_gelu_erf`
+
+```c
+struct ggml_tensor * ggml_gelu_erf(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a);
+```
+
+GELU computed using the error function (`erf`) when available. Some backends may fall back to the Abramowitz and Stegun approximation.
+
+### `ggml_gelu_quick`
+
+```c
+struct ggml_tensor * ggml_gelu_quick(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a);
+```
+
+Faster GELU approximation.
+
+### `ggml_silu`
+
+```c
+struct ggml_tensor * ggml_silu(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a);
+```
+
+Sigmoid Linear Unit: `a * sigmoid(a)`.
+
+### `ggml_silu_back`
+
+```c
+struct ggml_tensor * ggml_silu_back(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,  // x (forward input)
+    struct ggml_tensor  * b); // dy (upstream gradient)
+```
+
+Backward pass of SiLU. Returns `dx` given `x` and `dy`.
+
+### `ggml_sigmoid`
+
+```c
+struct ggml_tensor * ggml_sigmoid(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a);
+```
+
+Logistic sigmoid: `1 / (1 + exp(-a))`.
+
+### `ggml_tanh`
+
+```c
+struct ggml_tensor * ggml_tanh(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a);
+```
+
+Hyperbolic tangent.
+
+### `ggml_elu`
+
+```c
+struct ggml_tensor * ggml_elu(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a);
+```
+
+Exponential Linear Unit: `a >= 0 ? a : exp(a) - 1`.
+
+### `ggml_hardswish` / `ggml_hardsigmoid`
+
+```c
+struct ggml_tensor * ggml_hardswish  (struct ggml_context * ctx, struct ggml_tensor * a);
+struct ggml_tensor * ggml_hardsigmoid(struct ggml_context * ctx, struct ggml_tensor * a);
+```
+
+- `hardswish(x) = x * relu6(x + 3) / 6`
+- `hardsigmoid(x) = relu6(x + 3) / 6`
+
+### Gated linear units
+
+ggml provides fused GLU variants that split or gate the activation in a single op:
+
+```c
+// Single-tensor GLU (gate in second half of row)
+struct ggml_tensor * ggml_reglu  (struct ggml_context * ctx, struct ggml_tensor * a);
+struct ggml_tensor * ggml_geglu  (struct ggml_context * ctx, struct ggml_tensor * a);
+struct ggml_tensor * ggml_swiglu (struct ggml_context * ctx, struct ggml_tensor * a);
+
+// Split-tensor GLU (separate tensors for input and gate)
+struct ggml_tensor * ggml_reglu_split (
+    struct ggml_context * ctx, struct ggml_tensor * a, struct ggml_tensor * b);
+struct ggml_tensor * ggml_geglu_split (
+    struct ggml_context * ctx, struct ggml_tensor * a, struct ggml_tensor * b);
+struct ggml_tensor * ggml_swiglu_split(
+    struct ggml_context * ctx, struct ggml_tensor * a, struct ggml_tensor * b);
+```
+
+</Accordion>
+
+<Accordion title="Normalization">
+
+### `ggml_norm`
+
+```c
+struct ggml_tensor * ggml_norm(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    float                 eps);
+```
+
+Layer normalization along rows. Subtracts the row mean and divides by the row standard deviation. `eps` is added to the variance before taking the square root for numerical stability.
+
+### `ggml_rms_norm`
+
+```c
+struct ggml_tensor * ggml_rms_norm(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    float                 eps);
+```
+
+Root mean square normalization along rows. Divides each row by its RMS. Commonly used in LLaMA-style transformers.
+
+### `ggml_l2_norm`
+
+```c
+struct ggml_tensor * ggml_l2_norm(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    float                 eps);
+```
+
+L2 normalization along rows. Divides each row by its L2 norm. Used in RWKV v7.
+
+### `ggml_group_norm`
+
+```c
+struct ggml_tensor * ggml_group_norm(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    int                   n_groups,
+    float                 eps);
+```
+
+Group normalization along `ne0 * ne1 / n_groups` channels. Commonly used in image models such as Stable Diffusion.
+
+<ParamField body="n_groups" type="int" required>
+  Number of channel groups to normalize over.
+</ParamField>
+
+<ParamField body="eps" type="float" required>
+  Small constant added to the variance for numerical stability.
+</ParamField>
+
+</Accordion>
+
+<Accordion title="Attention">
+
+### `ggml_flash_attn_ext`
+
+```c
+struct ggml_tensor * ggml_flash_attn_ext(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * q,
+    struct ggml_tensor  * k,
+    struct ggml_tensor  * v,
+    struct ggml_tensor  * mask,
+    float                 scale,
+    float                 max_bias,
+    float                 logit_softcap);
+```
+
+Fused scaled-dot-product attention with optional ALiBi bias and logit soft-capping. This is the primary attention kernel used by llama.cpp and related projects.
+
+Tensor layout:
+- `q`: `[n_embd_k, n_batch, n_head, ne3]`
+- `k`: `[n_embd_k, n_kv, n_head_kv, ne3]`
+- `v`: `[n_embd_v, n_kv, n_head_kv, ne3]` — **not** pre-transposed
+- `mask`: `[n_kv, n_batch, ne32, ne33]` — F16 or F32, optional
+- result: `[n_embd_v, n_head, n_batch, ne3]` — permuted
+
+<ParamField body="scale" type="float" required>
+  Attention scaling factor applied before softmax. Typically `1/sqrt(head_dim)`.
+</ParamField>
+
+<ParamField body="max_bias" type="float" required>
+  Maximum ALiBi slope. Set to `0.0` to disable ALiBi bias.
+</ParamField>
+
+<ParamField body="logit_softcap" type="float" required>
+  Soft-cap applied to logits as `tanh(logit / cap) * cap`. Set to `0.0` to disable.
+</ParamField>
+
+```c
+void ggml_flash_attn_ext_set_prec(
+    struct ggml_tensor * a,
+    enum ggml_prec       prec);
+```
+
+Overrides the precision of the flash attention accumulation (e.g. `GGML_PREC_F32`).
+
+### `ggml_soft_max_ext`
+
+```c
+struct ggml_tensor * ggml_soft_max_ext(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    struct ggml_tensor  * mask,
+    float                 scale,
+    float                 max_bias);
+```
+
+Fused softmax with optional attention mask and ALiBi bias. Computes `softmax(a * scale + mask * alibi_slope)`.
+
+</Accordion>
+
+<Accordion title="Reshape and view">
+
+### `ggml_reshape_1d` / `_2d` / `_3d` / `_4d`
+
+```c
+struct ggml_tensor * ggml_reshape_1d(
+    struct ggml_context * ctx, struct ggml_tensor * a, int64_t ne0);
+
+struct ggml_tensor * ggml_reshape_2d(
+    struct ggml_context * ctx, struct ggml_tensor * a,
+    int64_t ne0, int64_t ne1);
+
+struct ggml_tensor * ggml_reshape_3d(
+    struct ggml_context * ctx, struct ggml_tensor * a,
+    int64_t ne0, int64_t ne1, int64_t ne2);
+
+struct ggml_tensor * ggml_reshape_4d(
+    struct ggml_context * ctx, struct ggml_tensor * a,
+    int64_t ne0, int64_t ne1, int64_t ne2, int64_t ne3);
+```
+
+Returns a view of `a` with the specified shape. Total element count must match. `a` must be contiguous.
+
+### `ggml_view_1d` / `_2d` / `_3d` / `_4d`
+
+```c
+struct ggml_tensor * ggml_view_1d(
+    struct ggml_context * ctx, struct ggml_tensor * a,
+    int64_t ne0, size_t offset);
+
+struct ggml_tensor * ggml_view_2d(
+    struct ggml_context * ctx, struct ggml_tensor * a,
+    int64_t ne0, int64_t ne1,
+    size_t nb1,   // row stride in bytes
+    size_t offset);
+
+struct ggml_tensor * ggml_view_3d(
+    struct ggml_context * ctx, struct ggml_tensor * a,
+    int64_t ne0, int64_t ne1, int64_t ne2,
+    size_t nb1, size_t nb2, size_t offset);
+
+struct ggml_tensor * ggml_view_4d(
+    struct ggml_context * ctx, struct ggml_tensor * a,
+    int64_t ne0, int64_t ne1, int64_t ne2, int64_t ne3,
+    size_t nb1, size_t nb2, size_t nb3, size_t offset);
+```
+
+Creates a view into `a` starting at `offset` bytes. Strides can differ from `a`, enabling sub-matrix and strided views without copying.
+
+### `ggml_transpose`
+
+```c
+struct ggml_tensor * ggml_transpose(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a);
+```
+
+Swaps the first two dimensions of `a`. Equivalent to `ggml_permute(ctx, a, 1, 0, 2, 3)`. Returns a view; no data is copied.
+
+### `ggml_permute`
+
+```c
+struct ggml_tensor * ggml_permute(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    int axis0, int axis1, int axis2, int axis3);
+```
+
+Arbitrarily reorders the four axes of `a`. For example, `ggml_permute(ctx, a, 2, 1, 0, 3)` moves dimension 2 to position 0. Returns a non-contiguous view; no data is copied.
+
+### `ggml_cont`
+
+```c
+struct ggml_tensor * ggml_cont(struct ggml_context * ctx, struct ggml_tensor * a);
+```
+
+Makes a contiguous copy of `a` if it is not already contiguous. Variants `ggml_cont_1d` through `ggml_cont_4d` also reshape while making contiguous.
+
+</Accordion>
+
+<Accordion title="Reduction">
+
+### `ggml_sum`
+
+```c
+struct ggml_tensor * ggml_sum(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a);
+```
+
+Reduces all elements to a scalar by summing.
+
+### `ggml_sum_rows`
+
+```c
+struct ggml_tensor * ggml_sum_rows(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a);
+```
+
+Sums along dimension 0 (rows). Input shape `[a, b, c, d]` → output shape `[1, b, c, d]`.
+
+### `ggml_mean`
+
+```c
+struct ggml_tensor * ggml_mean(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a);
+```
+
+Computes the mean along rows.
+
+### `ggml_argmax`
+
+```c
+struct ggml_tensor * ggml_argmax(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a);
+```
+
+Returns the index of the maximum element along each row.
+
+### `ggml_top_k`
+
+```c
+struct ggml_tensor * ggml_top_k(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    int                   k);
+```
+
+Returns the top-`k` elements per row. The returned indices are not in sorted order.
+
+<Note>Use `ggml_argsort` if you need fully sorted rows.</Note>
+
+### `ggml_argsort`
+
+```c
+struct ggml_tensor * ggml_argsort(
+    struct ggml_context  * ctx,
+    struct ggml_tensor   * a,
+    enum ggml_sort_order   order); // GGML_SORT_ORDER_ASC or GGML_SORT_ORDER_DESC
+```
+
+Returns the indices that would sort each row in the given order.
+
+### `ggml_cumsum`
+
+```c
+struct ggml_tensor * ggml_cumsum(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a);
+```
+
+Cumulative sum along the row dimension.
+
+</Accordion>
+
+<Accordion title="Convolution">
+
+### `ggml_conv_1d`
+
+```c
+struct ggml_tensor * ggml_conv_1d(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,  // convolution kernel
+    struct ggml_tensor  * b,  // input data
+    int                   s0, // stride
+    int                   p0, // padding
+    int                   d0);// dilation
+```
+
+1D convolution of data `b` with kernel `a`.
+
+<ParamField body="a" type="struct ggml_tensor *" required>
+  Convolution kernel tensor.
+</ParamField>
+
+<ParamField body="b" type="struct ggml_tensor *" required>
+  Input data tensor.
+</ParamField>
+
+<ParamField body="s0" type="int" required>
+  Stride along dimension 0.
+</ParamField>
+
+<ParamField body="p0" type="int" required>
+  Padding along dimension 0.
+</ParamField>
+
+<ParamField body="d0" type="int" required>
+  Dilation along dimension 0.
+</ParamField>
+
+### `ggml_conv_2d`
+
+```c
+struct ggml_tensor * ggml_conv_2d(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,  // convolution kernel
+    struct ggml_tensor  * b,  // input data
+    int                   s0, // stride dimension 0
+    int                   s1, // stride dimension 1
+    int                   p0, // padding dimension 0
+    int                   p1, // padding dimension 1
+    int                   d0, // dilation dimension 0
+    int                   d1);// dilation dimension 1
+```
+
+2D convolution. Implemented via `ggml_im2col` + `ggml_mul_mat`.
+
+</Accordion>
+
+<Accordion title="Embedding and positional encoding">
+
+### `ggml_get_rows`
+
+```c
+struct ggml_tensor * ggml_get_rows(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,  // data   [n_embd, ne1, ne2, ne3]
+    struct ggml_tensor  * b); // row indices (I32) [n_rows, ne2, ne3, 1]
+```
+
+Gathers rows from `a` by the integer indices stored in `b`. Used for token embedding lookup.
+
+Result shape: `[n_embd, n_rows, ne2, ne3]`.
+
+### `ggml_rope`
+
+```c
+struct ggml_tensor * ggml_rope(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,     // query or key tensor
+    struct ggml_tensor  * b,     // position indices (I32), size == a->ne[2]
+    int                   n_dims,// number of dimensions to rotate
+    int                   mode); // GGML_ROPE_TYPE_NORMAL, GGML_ROPE_TYPE_NEOX, etc.
+```
+
+Applies Rotary Position Embedding (RoPE) to `a`. `b` is a 1D tensor of position indices.
+
+### `ggml_rope_ext`
+
+```c
+struct ggml_tensor * ggml_rope_ext(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    struct ggml_tensor  * b,          // position indices
+    struct ggml_tensor  * c,          // frequency factors (optional, e.g. Phi3-128k)
+    int                   n_dims,
+    int                   mode,
+    int                   n_ctx_orig, // original context length for YaRN scaling
+    float                 freq_base,
+    float                 freq_scale,
+    float                 ext_factor,
+    float                 attn_factor,
+    float                 beta_fast,
+    float                 beta_slow);
+```
+
+Extended RoPE with support for YaRN-style context extension and custom frequency scaling. Use this instead of the deprecated `ggml_rope_custom`.
+
+<ParamField body="c" type="struct ggml_tensor *">
+  Optional per-dimension frequency scaling factors. Pass `NULL` to use default RoPE frequencies.
+</ParamField>
+
+<ParamField body="n_ctx_orig" type="int" required>
+  Original training context length. Used to compute YaRN correction dimensions.
+</ParamField>
+
+<ParamField body="freq_base" type="float" required>
+  Base frequency for the sinusoidal position encoding (e.g. `10000.0`).
+</ParamField>
+
+<ParamField body="ext_factor" type="float" required>
+  YaRN extrapolation factor. Set to `0.0` to disable YaRN.
+</ParamField>
+
+</Accordion>
+
+<Accordion title="Loss functions">
+
+### `ggml_cross_entropy_loss`
+
+```c
+struct ggml_tensor * ggml_cross_entropy_loss(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,  // logits
+    struct ggml_tensor  * b); // labels
+```
+
+Computes cross-entropy loss between logits `a` and ground-truth labels `b`. The result is a scalar tensor. Mark it with `ggml_set_loss()` to use it as the optimization objective.
+
+</Accordion>
+
+<Accordion title="Concatenation and repetition">
+
+### `ggml_concat`
+
+```c
+struct ggml_tensor * ggml_concat(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    struct ggml_tensor  * b,
+    int                   dim);
+```
+
+Concatenates `a` and `b` along dimension `dim`.
+
+### `ggml_repeat`
+
+```c
+struct ggml_tensor * ggml_repeat(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    struct ggml_tensor  * b);
+```
+
+Repeats (tiles) `a` to match the shape of `b`. If `a` already has the same shape as `b` and is not a parameter tensor, returns `a` directly.
+
+### `ggml_repeat_4d`
+
+```c
+struct ggml_tensor * ggml_repeat_4d(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    int64_t ne0, int64_t ne1, int64_t ne2, int64_t ne3);
+```
+
+Repeats `a` to an explicit 4D target shape.
+
+</Accordion>
+
+<Accordion title="Diagonal and masking">
+
+### `ggml_diag`
+
+```c
+struct ggml_tensor * ggml_diag(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a);
+```
+
+Constructs a diagonal matrix from vector `a`.
+
+### `ggml_diag_mask_inf`
+
+```c
+struct ggml_tensor * ggml_diag_mask_inf(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    int                   n_past);
+```
+
+Sets elements above the diagonal to `-INF`. Used to implement causal attention masks.
+
+<ParamField body="n_past" type="int" required>
+  Number of past tokens. Columns at or before `n_past` are not masked.
+</ParamField>
+
+### `ggml_diag_mask_zero`
+
+```c
+struct ggml_tensor * ggml_diag_mask_zero(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * a,
+    int                   n_past);
+```
+
+Sets elements above the diagonal to `0`.
+
+</Accordion>
+
+</AccordionGroup>

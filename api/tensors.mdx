@@ -1,0 +1,346 @@
+---
+title: "Tensor API"
+description: "Create and manipulate tensors"
+---
+
+A `ggml_tensor` is the fundamental data container in ggml. Tensors are always allocated inside a `ggml_context` and support up to four dimensions (`GGML_MAX_DIMS = 4`). They store data in row-major order using stride-based addressing, which allows views, transposes, and permutations without copying.
+
+## `ggml_type` enum
+
+Every tensor has an associated element type:
+
+| Value | Description |
+|---|---|
+| `GGML_TYPE_F32` | 32-bit float |
+| `GGML_TYPE_F16` | 16-bit float (IEEE 754) |
+| `GGML_TYPE_BF16` | Brain float 16 |
+| `GGML_TYPE_F64` | 64-bit double |
+| `GGML_TYPE_I8` | 8-bit signed integer |
+| `GGML_TYPE_I16` | 16-bit signed integer |
+| `GGML_TYPE_I32` | 32-bit signed integer |
+| `GGML_TYPE_I64` | 64-bit signed integer |
+| `GGML_TYPE_Q4_0` | 4-bit quantization, symmetric |
+| `GGML_TYPE_Q4_1` | 4-bit quantization with scale/min |
+| `GGML_TYPE_Q5_0` | 5-bit quantization, symmetric |
+| `GGML_TYPE_Q5_1` | 5-bit quantization with scale/min |
+| `GGML_TYPE_Q8_0` | 8-bit quantization, symmetric |
+| `GGML_TYPE_Q8_1` | 8-bit quantization with scale/min |
+| `GGML_TYPE_Q2_K` | 2-bit super-block quantization |
+| `GGML_TYPE_Q3_K` | 3-bit super-block quantization |
+| `GGML_TYPE_Q4_K` | 4-bit super-block quantization |
+| `GGML_TYPE_Q5_K` | 5-bit super-block quantization |
+| `GGML_TYPE_Q6_K` | 6-bit super-block quantization |
+| `GGML_TYPE_Q8_K` | 8-bit super-block quantization |
+| `GGML_TYPE_IQ1_S` | 1-bit importance-matrix quantization |
+| `GGML_TYPE_IQ1_M` | 1-bit importance-matrix quantization (M) |
+| `GGML_TYPE_IQ2_XXS` | 2-bit importance-matrix quantization (XXS) |
+| `GGML_TYPE_IQ2_XS` | 2-bit importance-matrix quantization (XS) |
+| `GGML_TYPE_IQ2_S` | 2-bit importance-matrix quantization (S) |
+| `GGML_TYPE_IQ3_XXS` | 3-bit importance-matrix quantization (XXS) |
+| `GGML_TYPE_IQ3_S` | 3-bit importance-matrix quantization (S) |
+| `GGML_TYPE_IQ4_NL` | 4-bit importance-matrix quantization (NL) |
+| `GGML_TYPE_IQ4_XS` | 4-bit importance-matrix quantization (XS) |
+| `GGML_TYPE_TQ1_0` | Ternary quantization 1-bit |
+| `GGML_TYPE_TQ2_0` | Ternary quantization 2-bit |
+| `GGML_TYPE_MXFP4` | MXFP4 (1 block) |
+| `GGML_TYPE_NVFP4` | NVFP4 (4 blocks, E4M3 scale) |
+
+## `ggml_tensor` struct
+
+```c
+struct ggml_tensor {
+    enum ggml_type         type;
+    int64_t                ne[GGML_MAX_DIMS]; // number of elements per dimension
+    size_t                 nb[GGML_MAX_DIMS]; // stride in bytes per dimension
+    enum ggml_op           op;
+    int32_t                flags;
+    struct ggml_tensor   * src[GGML_MAX_SRC]; // source (input) tensors for this op
+    struct ggml_tensor   * view_src;          // source tensor for views
+    size_t                 view_offs;         // byte offset into view_src
+    void                 * data;
+    char                   name[GGML_MAX_NAME];
+};
+```
+
+<ResponseField name="type" type="enum ggml_type">
+  Element data type. Determines the size of each element and whether the tensor is quantized.
+</ResponseField>
+
+<ResponseField name="ne[GGML_MAX_DIMS]" type="int64_t[4]">
+  Number of elements in each dimension. `ne[0]` is the innermost (fastest-changing) dimension. Unused dimensions are set to `1`.
+</ResponseField>
+
+<ResponseField name="nb[GGML_MAX_DIMS]" type="size_t[4]">
+  Stride in bytes for each dimension. `nb[0]` equals the element size; `nb[1]` equals the row size in bytes (may include padding). Strides allow non-contiguous memory layouts such as those produced by `ggml_transpose` and `ggml_permute`.
+</ResponseField>
+
+<ResponseField name="op" type="enum ggml_op">
+  The operation that produced this tensor. `GGML_OP_NONE` for leaf tensors.
+</ResponseField>
+
+<ResponseField name="flags" type="int32_t">
+  Bitmask of `ggml_tensor_flag` values: `GGML_TENSOR_FLAG_INPUT`, `GGML_TENSOR_FLAG_OUTPUT`, `GGML_TENSOR_FLAG_PARAM`, `GGML_TENSOR_FLAG_LOSS`, `GGML_TENSOR_FLAG_COMPUTE`.
+</ResponseField>
+
+<ResponseField name="src" type="struct ggml_tensor *[GGML_MAX_SRC]">
+  Pointers to the source tensors that this tensor was computed from. For example, after `c = ggml_add(ctx, a, b)`, `c->src[0] == a` and `c->src[1] == b`.
+</ResponseField>
+
+<ResponseField name="data" type="void *">
+  Raw pointer to the tensor's element data. When `no_alloc` is true on the context, this is `NULL` until externally assigned.
+</ResponseField>
+
+<ResponseField name="name" type="char[GGML_MAX_NAME]">
+  Human-readable label, up to 63 characters. Set with `ggml_set_name()` or `ggml_format_name()`.
+</ResponseField>
+
+## Creating tensors
+
+All creation functions allocate the tensor struct (and, unless `no_alloc` is set, the backing data) from the context's memory pool.
+
+### `ggml_new_tensor`
+
+```c
+struct ggml_tensor * ggml_new_tensor(
+    struct ggml_context * ctx,
+    enum   ggml_type      type,
+    int                   n_dims,
+    const  int64_t      * ne);
+```
+
+General-purpose tensor creation. `ne` is an array of `n_dims` element counts.
+
+<ParamField body="ctx" type="struct ggml_context *" required>
+  Context that owns the new tensor.
+</ParamField>
+
+<ParamField body="type" type="enum ggml_type" required>
+  Element data type.
+</ParamField>
+
+<ParamField body="n_dims" type="int" required>
+  Number of dimensions (1–4).
+</ParamField>
+
+<ParamField body="ne" type="const int64_t *" required>
+  Array of element counts, one per dimension. `ne[0]` is the innermost dimension.
+</ParamField>
+
+### Convenience constructors
+
+These wrap `ggml_new_tensor` for common dimensionalities:
+
+```c
+struct ggml_tensor * ggml_new_tensor_1d(
+    struct ggml_context * ctx,
+    enum   ggml_type      type,
+    int64_t ne0);
+
+struct ggml_tensor * ggml_new_tensor_2d(
+    struct ggml_context * ctx,
+    enum   ggml_type      type,
+    int64_t ne0, int64_t ne1);
+
+struct ggml_tensor * ggml_new_tensor_3d(
+    struct ggml_context * ctx,
+    enum   ggml_type      type,
+    int64_t ne0, int64_t ne1, int64_t ne2);
+
+struct ggml_tensor * ggml_new_tensor_4d(
+    struct ggml_context * ctx,
+    enum   ggml_type      type,
+    int64_t ne0, int64_t ne1, int64_t ne2, int64_t ne3);
+```
+
+```c
+// 1D vector of 512 floats
+struct ggml_tensor * v = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 512);
+
+// 2D matrix: 64 columns, 32 rows
+struct ggml_tensor * m = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 64, 32);
+```
+
+### `ggml_dup_tensor`
+
+```c
+struct ggml_tensor * ggml_dup_tensor(
+    struct ggml_context * ctx,
+    const struct ggml_tensor * src);
+```
+
+Allocates a new tensor with the same shape and type as `src`, but with its own independent data buffer. The data is **not** copied.
+
+### `ggml_view_tensor`
+
+```c
+struct ggml_tensor * ggml_view_tensor(
+    struct ggml_context * ctx,
+    struct ggml_tensor  * src);
+```
+
+Creates a new tensor that shares `src`'s data buffer (same shape, type, strides, and `data` pointer). Modifying the view's data modifies `src`'s data.
+
+## Naming
+
+### `ggml_set_name`
+
+```c
+struct ggml_tensor * ggml_set_name(
+    struct ggml_tensor * tensor,
+    const char         * name);
+```
+
+Sets the tensor's name (truncated to `GGML_MAX_NAME - 1` characters). Returns `tensor` for chaining.
+
+### `ggml_get_name`
+
+```c
+const char * ggml_get_name(const struct ggml_tensor * tensor);
+```
+
+Returns the tensor's name string.
+
+### `ggml_format_name`
+
+```c
+struct ggml_tensor * ggml_format_name(
+    struct ggml_tensor * tensor,
+    const char         * fmt, ...);
+```
+
+Printf-style name assignment. Returns `tensor`.
+
+## Tensor flags
+
+Flags mark tensors for special treatment during graph building and differentiation.
+
+### `ggml_set_input`
+
+```c
+void ggml_set_input(struct ggml_tensor * tensor);
+```
+
+Marks the tensor as a graph input (`GGML_TENSOR_FLAG_INPUT`). Input tensors must be filled with data before `ggml_graph_compute` is called.
+
+### `ggml_set_output`
+
+```c
+void ggml_set_output(struct ggml_tensor * tensor);
+```
+
+Marks the tensor as a graph output (`GGML_TENSOR_FLAG_OUTPUT`). Results are guaranteed to be written to host-accessible memory after computation.
+
+### `ggml_set_param`
+
+```c
+void ggml_set_param(struct ggml_tensor * tensor);
+```
+
+Marks the tensor as a trainable parameter (`GGML_TENSOR_FLAG_PARAM`). The automatic differentiation engine tracks gradients for param tensors.
+
+## Data accessors
+
+These functions are declared in `ggml-cpu.h` and operate on the CPU representation of tensor data.
+
+### Float accessors
+
+```c
+// Fill all elements with a scalar value
+struct ggml_tensor * ggml_set_f32(struct ggml_tensor * tensor, float value);
+
+// Read/write a single element by flat index
+float ggml_get_f32_1d(const struct ggml_tensor * tensor, int i);
+void  ggml_set_f32_1d(const struct ggml_tensor * tensor, int i, float value);
+
+// Read/write a single element by 4D coordinates
+float ggml_get_f32_nd(const struct ggml_tensor * tensor, int i0, int i1, int i2, int i3);
+void  ggml_set_f32_nd(const struct ggml_tensor * tensor, int i0, int i1, int i2, int i3, float value);
+```
+
+### Integer accessors
+
+```c
+// Fill all elements with a scalar integer value
+struct ggml_tensor * ggml_set_i32(struct ggml_tensor * tensor, int32_t value);
+
+// Read/write a single element by flat index
+int32_t ggml_get_i32_1d(const struct ggml_tensor * tensor, int i);
+void    ggml_set_i32_1d(const struct ggml_tensor * tensor, int i, int32_t value);
+
+// Read/write a single element by 4D coordinates
+int32_t ggml_get_i32_nd(const struct ggml_tensor * tensor, int i0, int i1, int i2, int i3);
+void    ggml_set_i32_nd(const struct ggml_tensor * tensor, int i0, int i1, int i2, int i3, int32_t value);
+```
+
+<Note>
+For non-F32 or non-I32 tensor types, the accessors perform implicit conversion. Direct stride-based pointer arithmetic is more efficient for bulk access:
+
+```c
+// Manual access to element (x, y) of a 2D F32 tensor
+float * elem = (float *)((char *)tensor->data + y * tensor->nb[1] + x * tensor->nb[0]);
+```
+</Note>
+
+## Type query functions
+
+### `ggml_nelements`
+
+```c
+int64_t ggml_nelements(const struct ggml_tensor * tensor);
+```
+
+Returns the total number of elements across all dimensions (`ne[0] * ne[1] * ne[2] * ne[3]`).
+
+### `ggml_nbytes`
+
+```c
+size_t ggml_nbytes(const struct ggml_tensor * tensor);
+```
+
+Returns the total size of the tensor's data in bytes.
+
+### `ggml_is_quantized`
+
+```c
+bool ggml_is_quantized(enum ggml_type type);
+```
+
+Returns `true` if the type is a quantized format (any `Q*` or `IQ*` type).
+
+### `ggml_is_contiguous`
+
+```c
+bool ggml_is_contiguous(const struct ggml_tensor * tensor);
+```
+
+Returns `true` if the tensor elements can be iterated with a flat index — no gaps and no permutation. Equivalent to `ggml_is_contiguous_0()`.
+
+### Additional query functions
+
+```c
+bool ggml_is_transposed(const struct ggml_tensor * tensor);
+bool ggml_is_permuted  (const struct ggml_tensor * tensor);
+bool ggml_is_empty     (const struct ggml_tensor * tensor);
+bool ggml_is_view      (const struct ggml_tensor * tensor);
+bool ggml_is_scalar    (const struct ggml_tensor * tensor);
+bool ggml_is_vector    (const struct ggml_tensor * tensor);
+bool ggml_is_matrix    (const struct ggml_tensor * tensor);
+int  ggml_n_dims       (const struct ggml_tensor * tensor);
+int64_t ggml_nrows     (const struct ggml_tensor * tensor);
+```
+
+## Context enumeration
+
+Iterate over all tensors in a context:
+
+```c
+struct ggml_tensor * ggml_get_first_tensor(const struct ggml_context * ctx);
+struct ggml_tensor * ggml_get_next_tensor (
+    const struct ggml_context * ctx,
+    struct ggml_tensor        * tensor);
+
+// Lookup by name
+struct ggml_tensor * ggml_get_tensor(
+    struct ggml_context * ctx,
+    const char          * name);
+```

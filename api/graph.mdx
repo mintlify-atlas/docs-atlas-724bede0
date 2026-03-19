@@ -1,0 +1,355 @@
+---
+title: "Computation Graph API"
+description: "Build and execute computation graphs"
+---
+
+ggml uses an explicit computation graph (`ggml_cgraph`) to separate the definition of computations from their execution. You define operations using the tensor API, which records nodes in the graph. You then call `ggml_graph_compute` to execute the graph.
+
+```c
+// 1. Define the computation
+struct ggml_context * ctx = ggml_init(params);
+struct ggml_tensor  * x   = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+struct ggml_tensor  * a   = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+struct ggml_tensor  * f   = ggml_mul(ctx, a, x);
+
+// 2. Build the graph
+struct ggml_cgraph * gf = ggml_new_graph(ctx);
+ggml_build_forward_expand(gf, f);
+
+// 3. Set inputs and compute
+ggml_set_f32(x, 2.0f);
+ggml_set_f32(a, 3.0f);
+ggml_graph_compute_with_ctx(ctx, gf, /*n_threads=*/1);
+
+printf("f = %f\n", ggml_get_f32_1d(f, 0));
+```
+
+## Creating graphs
+
+### `ggml_new_graph`
+
+```c
+struct ggml_cgraph * ggml_new_graph(struct ggml_context * ctx);
+```
+
+Allocates a new computation graph with the default capacity (`GGML_DEFAULT_GRAPH_SIZE = 2048` nodes) and no gradient storage. The graph memory is drawn from `ctx`'s pool.
+
+### `ggml_new_graph_custom`
+
+```c
+struct ggml_cgraph * ggml_new_graph_custom(
+    struct ggml_context * ctx,
+    size_t                size,
+    bool                  grads);
+```
+
+Allocates a graph with an explicit node capacity and optional gradient bookkeeping.
+
+<ParamField body="size" type="size_t" required>
+  Maximum number of nodes (tensors) the graph can hold.
+</ParamField>
+
+<ParamField body="grads" type="bool" required>
+  When `true`, the graph allocates gradient accumulator storage. Required before calling `ggml_build_backward_expand`.
+</ParamField>
+
+### `ggml_graph_overhead` / `ggml_graph_overhead_custom`
+
+```c
+size_t ggml_graph_overhead(void);
+size_t ggml_graph_overhead_custom(size_t size, bool grads);
+```
+
+Returns the number of bytes consumed by a graph structure in the context pool. Add this to your `mem_size` budget before calling `ggml_new_graph` or `ggml_new_graph_custom`.
+
+```c
+size_t mem_needed =
+    ggml_tensor_overhead() * n_tensors +
+    ggml_graph_overhead_custom(n_nodes, /*grads=*/false);
+
+struct ggml_init_params params = { .mem_size = mem_needed + 1024 };
+```
+
+## Building graphs
+
+### `ggml_build_forward_expand`
+
+```c
+void ggml_build_forward_expand(
+    struct ggml_cgraph * cgraph,
+    struct ggml_tensor * tensor);
+```
+
+Adds `tensor` and all of its transitive dependencies (source tensors) to the graph as forward-pass nodes. Call this once for each output tensor you want to compute.
+
+```c
+// Compute two separate outputs in one graph
+ggml_build_forward_expand(gf, loss);
+ggml_build_forward_expand(gf, accuracy);
+```
+
+### `ggml_build_backward_expand`
+
+```c
+void ggml_build_backward_expand(
+    struct ggml_context *  ctx,
+    struct ggml_cgraph  *  cgraph,
+    struct ggml_tensor  ** grad_accs);
+```
+
+Appends backward-pass nodes to `cgraph` for automatic differentiation. Must be called after all `ggml_build_forward_expand` calls. The graph must have been created with `grads = true`.
+
+<ParamField body="ctx" type="struct ggml_context *" required>
+  Context used to allocate gradient tensors.
+</ParamField>
+
+<ParamField body="cgraph" type="struct ggml_cgraph *" required>
+  The forward graph to differentiate. Backward nodes are appended in place.
+</ParamField>
+
+<ParamField body="grad_accs" type="struct ggml_tensor **" required>
+  Array of gradient accumulator tensors, one per node in the graph. Typically obtained via `ggml_graph_get_grad_acc`.
+</ParamField>
+
+## Computing graphs
+
+Compute functions are declared in `ggml-cpu.h` and operate on the CPU backend.
+
+### `ggml_graph_compute`
+
+```c
+enum ggml_status ggml_graph_compute(
+    struct ggml_cgraph * cgraph,
+    struct ggml_cplan  * cplan);
+```
+
+Executes the graph using the plan previously prepared by `ggml_graph_plan`. Returns `GGML_STATUS_SUCCESS` on success.
+
+Typical usage:
+
+```c
+struct ggml_cplan cplan = ggml_graph_plan(cgraph, n_threads, /*threadpool=*/NULL);
+if (cplan.work_size > 0) {
+    cplan.work_data = malloc(cplan.work_size);
+}
+enum ggml_status status = ggml_graph_compute(cgraph, &cplan);
+free(cplan.work_data);
+```
+
+### `ggml_graph_plan`
+
+```c
+struct ggml_cplan ggml_graph_plan(
+    const struct ggml_cgraph  * cgraph,
+    int                         n_threads,
+    struct ggml_threadpool    * threadpool);
+```
+
+Prepares a compute plan by determining the required work buffer size and associating a thread pool. Must be called before `ggml_graph_compute`. When `cplan.work_size > 0`, the caller must allocate `cplan.work_data` before passing it to `ggml_graph_compute`.
+
+<ParamField body="n_threads" type="int" required>
+  Number of threads to use. Pass `GGML_DEFAULT_N_THREADS` (4) for the default.
+</ParamField>
+
+<ParamField body="threadpool" type="struct ggml_threadpool *">
+  Pre-created thread pool. Pass `NULL` to create a temporary pool internally.
+</ParamField>
+
+### `ggml_graph_compute_with_ctx`
+
+```c
+enum ggml_status ggml_graph_compute_with_ctx(
+    struct ggml_context * ctx,
+    struct ggml_cgraph  * cgraph,
+    int                   n_threads);
+```
+
+Convenience wrapper that allocates the work buffer inside `ctx` instead of requiring the caller to manage it separately. The context must have enough remaining space for the work data.
+
+<Note>
+The trade-off of `ggml_graph_compute_with_ctx` over `ggml_graph_compute` is that you must reserve extra memory in the context for the work buffer. Use `ggml_graph_compute` directly when memory is tight.
+</Note>
+
+## Graph inspection
+
+### `ggml_graph_n_nodes`
+
+```c
+int ggml_graph_n_nodes(struct ggml_cgraph * cgraph);
+```
+
+Returns the number of nodes currently stored in the graph.
+
+### `ggml_graph_nodes`
+
+```c
+struct ggml_tensor ** ggml_graph_nodes(struct ggml_cgraph * cgraph);
+```
+
+Returns a pointer to the internal array of node tensors. The array has `ggml_graph_n_nodes()` entries.
+
+### `ggml_graph_node`
+
+```c
+struct ggml_tensor * ggml_graph_node(struct ggml_cgraph * cgraph, int i);
+```
+
+Returns the `i`-th node. Negative `i` counts from the end (`nodes[n_nodes + i]`).
+
+### `ggml_graph_get_tensor`
+
+```c
+struct ggml_tensor * ggml_graph_get_tensor(
+    const struct ggml_cgraph * cgraph,
+    const char               * name);
+```
+
+Looks up a tensor in the graph by name. Returns `NULL` if not found.
+
+### `ggml_graph_get_grad`
+
+```c
+struct ggml_tensor * ggml_graph_get_grad(
+    const struct ggml_cgraph * cgraph,
+    const struct ggml_tensor * node);
+```
+
+Returns the gradient tensor for `node`. Only valid after `ggml_build_backward_expand` has been called on a graph created with `grads = true`.
+
+### `ggml_graph_get_grad_acc`
+
+```c
+struct ggml_tensor * ggml_graph_get_grad_acc(
+    const struct ggml_cgraph * cgraph,
+    const struct ggml_tensor * node);
+```
+
+Returns the gradient accumulator tensor for `node`. Gradient accumulators accumulate gradients across multiple backward passes before being reset.
+
+## Graph utilities
+
+### `ggml_graph_reset`
+
+```c
+void ggml_graph_reset(struct ggml_cgraph * cgraph);
+```
+
+Resets all regular gradient tensors and optimizer momenta to zero, and sets the loss gradient to `1`. Call before each backward pass in a training loop.
+
+### `ggml_graph_clear`
+
+```c
+void ggml_graph_clear(struct ggml_cgraph * cgraph);
+```
+
+Removes all nodes from the graph without freeing the underlying memory. The graph can then be rebuilt with new nodes.
+
+### `ggml_graph_print`
+
+```c
+void ggml_graph_print(const struct ggml_cgraph * cgraph);
+```
+
+Prints information and performance data for every node in the graph to `stderr`.
+
+### `ggml_graph_dump_dot`
+
+```c
+void ggml_graph_dump_dot(
+    const struct ggml_cgraph * gb,
+    const struct ggml_cgraph * cgraph,
+    const char               * filename);
+```
+
+Writes a Graphviz `.dot` file representing the computation graph. Pass the backward graph as `gb` and the forward graph as `cgraph`. Open the output file with `dot -Tsvg graph.dot -o graph.svg` to visualize the graph.
+
+## Thread pool
+
+The thread pool is declared in `ggml.h` and implemented in the CPU backend (`ggml-cpu.h`).
+
+### `ggml_threadpool_params`
+
+```c
+struct ggml_threadpool_params {
+    bool                     cpumask[GGML_MAX_N_THREADS]; // CPU affinity mask
+    int                      n_threads;                   // number of threads
+    enum ggml_sched_priority prio;                        // thread priority
+    uint32_t                 poll;     // polling level (0 = no polling, 100 = aggressive)
+    bool                     strict_cpu; // strict CPU placement
+    bool                     paused;   // start in paused state
+};
+```
+
+<ParamField body="cpumask" type="bool[512]">
+  CPU affinity mask. All-zeros means use the OS default affinity settings.
+</ParamField>
+
+<ParamField body="n_threads" type="int" required>
+  Number of worker threads in the pool.
+</ParamField>
+
+<ParamField body="prio" type="enum ggml_sched_priority">
+  Scheduling priority: `GGML_SCHED_PRIO_LOW`, `GGML_SCHED_PRIO_NORMAL`, `GGML_SCHED_PRIO_MEDIUM`, `GGML_SCHED_PRIO_HIGH`, or `GGML_SCHED_PRIO_REALTIME`.
+</ParamField>
+
+<ParamField body="poll" type="uint32_t">
+  Polling aggressiveness. `0` means the threads sleep when idle; `100` means aggressive spinning. Higher values reduce latency at the cost of CPU utilization.
+</ParamField>
+
+<ParamField body="paused" type="bool">
+  When `true`, worker threads start in a paused state and must be resumed with `ggml_threadpool_resume` before they process any work.
+</ParamField>
+
+### `ggml_threadpool_params_default`
+
+```c
+struct ggml_threadpool_params ggml_threadpool_params_default(int n_threads);
+```
+
+Returns a `ggml_threadpool_params` populated with sensible defaults for `n_threads` threads.
+
+### `ggml_threadpool_params_init`
+
+```c
+void ggml_threadpool_params_init(
+    struct ggml_threadpool_params * p,
+    int                             n_threads);
+```
+
+Initializes an existing `ggml_threadpool_params` struct in place with default values.
+
+### `ggml_threadpool_new`
+
+```c
+struct ggml_threadpool * ggml_threadpool_new(
+    struct ggml_threadpool_params * params);
+```
+
+Creates and starts a new thread pool with the given parameters. Returns `NULL` on failure.
+
+```c
+struct ggml_threadpool_params tp_params = ggml_threadpool_params_default(8);
+struct ggml_threadpool * pool = ggml_threadpool_new(&tp_params);
+
+struct ggml_cplan cplan = ggml_graph_plan(cgraph, 8, pool);
+ggml_graph_compute(cgraph, &cplan);
+
+ggml_threadpool_free(pool);
+```
+
+### `ggml_threadpool_free`
+
+```c
+void ggml_threadpool_free(struct ggml_threadpool * threadpool);
+```
+
+Shuts down all worker threads and releases all resources associated with the pool.
+
+### `ggml_threadpool_pause` / `ggml_threadpool_resume`
+
+```c
+void ggml_threadpool_pause (struct ggml_threadpool * threadpool);
+void ggml_threadpool_resume(struct ggml_threadpool * threadpool);
+```
+
+Pauses and resumes worker threads. Pausing frees CPU time when no computation is in progress (e.g., during I/O-bound work between forward passes).

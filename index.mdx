@@ -1,97 +1,159 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "ggml"
+description: "Tensor library for machine learning — low-level, fast, and dependency-free"
 ---
 
-## Setting up
+<div style={{background: "linear-gradient(135deg, #0a1229 0%, #1a2340 100%)", borderRadius: "24px", padding: "48px 40px", marginBottom: "32px"}}>
+  <div style={{color: "#fac518", fontWeight: "700", fontSize: "13px", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: "12px"}}>Open Source · MIT License</div>
+  <h1 style={{color: "#ffffff", fontSize: "42px", fontWeight: "700", lineHeight: "1.2", margin: "0 0 16px 0"}}>Tensor library for machine learning</h1>
+  <p style={{color: "#a0a8b8", fontSize: "18px", lineHeight: "1.6", margin: "0 0 32px 0", maxWidth: "600px"}}>
+    ggml is a low-level C library for tensor operations and machine learning inference. It powers llama.cpp, whisper.cpp, and many other high-performance ML runtimes — with zero third-party dependencies.
+  </p>
+  <div style={{display: "flex", gap: "12px", flexWrap: "wrap"}}>
+    <a href="/quickstart" style={{background: "#fac518", color: "#0a1229", padding: "12px 24px", borderRadius: "12px", fontWeight: "700", textDecoration: "none", fontSize: "15px"}}>Get Started →</a>
+    <a href="https://github.com/ggml-org/ggml" style={{background: "transparent", color: "#ffffff", padding: "12px 24px", borderRadius: "12px", fontWeight: "600", textDecoration: "none", fontSize: "15px", border: "1px solid rgba(255,255,255,0.2)"}}>View on GitHub</a>
+  </div>
+</div>
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build from source and run your first ggml computation graph in minutes.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Core Concepts" icon="book" href="/concepts/tensors">
+    Understand tensors, computation graphs, and automatic differentiation.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Backends" icon="microchip" href="/backends/overview">
+    Run on CPU, CUDA, Metal, Vulkan, OpenCL, SYCL, WebGPU, or remotely via RPC.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="API Reference" icon="code" href="/api/context">
+    Full C API reference for context, tensors, operations, and graph execution.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Why ggml?
 
-Everything you need to create world-class documentation.
+ggml was built to enable efficient machine learning inference on consumer hardware. It is the foundation of [llama.cpp](https://github.com/ggerganov/llama.cpp) and [whisper.cpp](https://github.com/ggerganov/whisper.cpp) — enabling billions of people to run large language models locally.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={3}>
+  <Card title="No dependencies" icon="box">
+    Pure C/C++ with zero third-party library requirements. Integrate into any project.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Zero runtime allocs" icon="memory">
+    Memory is pre-allocated at initialization. No heap allocations during computation.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="Integer quantization" icon="compress">
+    Q2 through Q8 quantization formats for dramatically reduced model size and memory use.
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="Auto-differentiation" icon="arrows-split-up-and-left">
+    Define computation graphs once; compute forward and backward passes automatically.
   </Card>
-</Columns>
+  <Card title="Multi-backend" icon="server">
+    Transparent dispatch to CPU, CUDA, Metal, Vulkan, and more via the backend scheduler.
+  </Card>
+  <Card title="GGUF format" icon="file-binary">
+    Efficient binary file format for storing and loading quantized models with metadata.
+  </Card>
+</CardGroup>
 
-## Need inspiration?
+## Key capabilities
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<Tabs>
+  <Tab title="Inference">
+    ggml defines a computation graph API where tensor operations are recorded, then executed in bulk. This enables:
+
+    - Efficient memory reuse across forward passes
+    - Hardware-accelerated execution through pluggable backends
+    - Integer quantization for reduced memory bandwidth
+    - Flash attention and other fused operations for transformer models
+
+    ```c
+    struct ggml_init_params params = {
+        .mem_size   = 256*1024*1024,
+        .mem_buffer = NULL,
+    };
+    struct ggml_context * ctx = ggml_init(params);
+
+    struct ggml_tensor * a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4096, 4096);
+    struct ggml_tensor * b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4096, 4096);
+    struct ggml_tensor * c = ggml_mul_mat(ctx, a, b);
+
+    struct ggml_cgraph * gf = ggml_new_graph(ctx);
+    ggml_build_forward_expand(gf, c);
+    ggml_graph_compute_with_ctx(ctx, gf, /*n_threads=*/4);
+
+    ggml_free(ctx);
+    ```
+  </Tab>
+  <Tab title="Training">
+    ggml supports training via automatic differentiation and built-in optimizers:
+
+    - AdamW and SGD optimizers
+    - Cross-entropy and mean-squared-error loss functions
+    - Dataset management with shuffling and batching
+    - High-level `ggml_opt_fit` for common training loops
+
+    ```c
+    // Create optimizer context
+    ggml_backend_sched_t sched = ...; // set up backend scheduler
+    struct ggml_opt_params opt_params = ggml_opt_default_params(sched, GGML_OPT_LOSS_TYPE_CROSS_ENTROPY);
+    opt_params.optimizer = GGML_OPT_OPTIMIZER_TYPE_ADAMW;
+
+    ggml_opt_context_t opt_ctx = ggml_opt_init(opt_params);
+
+    // Fit model to dataset
+    ggml_opt_fit(sched, ctx_compute, inputs, outputs, dataset,
+                 GGML_OPT_LOSS_TYPE_CROSS_ENTROPY,
+                 GGML_OPT_OPTIMIZER_TYPE_ADAMW,
+                 ggml_opt_get_default_optimizer_params,
+                 /*nepoch=*/10, /*nbatch_logical=*/32,
+                 /*val_split=*/0.1f, /*silent=*/false);
+    ```
+  </Tab>
+  <Tab title="Quantization">
+    ggml natively supports storing and computing with quantized weights:
+
+    - 2-bit through 8-bit integer quantization
+    - Mixed-precision computation (quantized weights, FP32/FP16 activations)
+    - Hardware-accelerated dequantization on CUDA, Metal, and CPU with SIMD
+
+    ```c
+    // Quantize a buffer of f32 weights to Q4_K_M
+    size_t quantized_size = ggml_quantize_chunk(
+        GGML_TYPE_Q4_K,     // target quantization type
+        src_data,            // source f32 data
+        dst_data,            // destination quantized buffer
+        0,                   // starting row
+        nrows,               // number of rows
+        ncols,               // number of columns
+        /*imatrix=*/NULL     // importance matrix (optional)
+    );
+    ```
+  </Tab>
+</Tabs>
+
+## Hardware support
+
+ggml runs on a wide range of hardware through its pluggable backend system:
+
+| Backend | Devices | Notes |
+|---------|---------|-------|
+| CPU | x86, ARM, RISC-V, PowerPC | SIMD via AVX/AVX2/AVX-512/NEON/SVE |
+| CUDA | NVIDIA GPUs | Requires CUDA toolkit |
+| Metal | Apple Silicon, AMD GPUs (macOS) | Best performance on Apple devices |
+| Vulkan | Cross-vendor GPU support | Linux, Windows, Android |
+| OpenCL | AMD, Intel, Qualcomm GPUs | |
+| SYCL | Intel GPUs, oneAPI | |
+| WebGPU | Browser / WASM | |
+| RPC | Remote devices | Distribute computation across machines |
+
+## Used by
+
+ggml powers some of the most popular open-source ML projects:
+
+- **[llama.cpp](https://github.com/ggerganov/llama.cpp)** — Run LLaMA, Mistral, Qwen, and hundreds of other LLMs locally
+- **[whisper.cpp](https://github.com/ggerganov/whisper.cpp)** — Real-time speech recognition
+- **[stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp)** — Stable Diffusion image generation
+
+<Note>
+  ggml is under active development. Much of the ongoing development happens in the [llama.cpp](https://github.com/ggerganov/llama.cpp) and [whisper.cpp](https://github.com/ggerganov/whisper.cpp) repositories before being upstreamed.
+</Note>

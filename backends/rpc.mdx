@@ -1,0 +1,140 @@
+---
+title: "RPC backend"
+description: "Distribute ggml computation to remote machines over the network"
+---
+
+The RPC backend lets a client machine offload tensor operations to one or more remote servers. Each server exposes a local ggml backend (CPU, CUDA, Metal, etc.) over a TCP socket. The client treats the remote device exactly like any other backend — the scheduler, buffer types, and graph compute API are identical.
+
+## Use cases
+
+- Offload inference to a remote machine with a powerful GPU
+- Distribute a large model across multiple machines when it does not fit in the memory of a single node
+- Run heterogeneous clusters where different nodes have different hardware
+
+## Protocol version
+
+The RPC protocol is versioned. Client and server must use compatible versions:
+
+```c
+#define RPC_PROTO_MAJOR_VERSION  3
+#define RPC_PROTO_MINOR_VERSION  6
+#define RPC_PROTO_PATCH_VERSION  1
+```
+
+The patch version increments with each change to `GGML_OP_COUNT`. Keep client and server binaries in sync.
+
+## Build
+
+Enable the RPC backend on both the server and client machines:
+
+```bash
+cmake -B build -DGGML_RPC=ON
+cmake --build build
+```
+
+## Starting a server
+
+A server hosts one or more local backends and listens on a TCP endpoint. Start one with `ggml_backend_rpc_start_server`:
+
+```c
+#include "ggml-rpc.h"
+#include "ggml-backend.h"
+
+int main(void) {
+    ggml_backend_load_all();
+
+    // Expose a CUDA device over the network
+    ggml_backend_dev_t dev = ggml_backend_dev_by_name("CUDA0");
+    // Or expose the CPU:
+    // ggml_backend_dev_t dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+
+    ggml_backend_dev_t devices[1] = { dev };
+
+    // endpoint format: "host:port"
+    ggml_backend_rpc_start_server(
+        "0.0.0.0:50052",  // listen address
+        NULL,              // cache directory (NULL = no cache)
+        4,                 // number of CPU threads for server-side work
+        1,                 // number of devices
+        devices
+    );
+    // blocks until the server is stopped
+    return 0;
+}
+```
+
+<Warning>
+  The RPC server has no authentication. Only expose it on trusted networks or behind a firewall. Do not bind to a public interface in production without additional network security controls.
+</Warning>
+
+## Connecting a client
+
+On the client, initialise an RPC backend pointing at the server's endpoint:
+
+```c
+#include "ggml-rpc.h"
+
+// Connect to device 0 on the remote server
+ggml_backend_t rpc_backend = ggml_backend_rpc_init("192.168.1.10:50052", 0);
+if (!rpc_backend) {
+    fprintf(stderr, "failed to connect to RPC server\n");
+    return 1;
+}
+```
+
+You can also use the registry API to register a remote server and then use the standard device enumeration:
+
+```c
+ggml_backend_reg_t reg = ggml_backend_rpc_add_server("192.168.1.10:50052");
+// The server's devices are now visible via ggml_backend_dev_*
+```
+
+## Querying remote memory
+
+Before allocating buffers, check available memory on the remote device:
+
+```c
+size_t free, total;
+ggml_backend_rpc_get_device_memory("192.168.1.10:50052", 0, &free, &total);
+printf("remote device: %.1f / %.1f GB free\n", free / 1e9, total / 1e9);
+```
+
+## Multi-server setup
+
+You can connect to several servers and use them together via the scheduler. The limit is `GGML_RPC_MAX_SERVERS` (16) connections per process.
+
+```c
+ggml_backend_t rpc0 = ggml_backend_rpc_init("server-a:50052", 0);
+ggml_backend_t rpc1 = ggml_backend_rpc_init("server-b:50052", 0);
+ggml_backend_t cpu  = ggml_backend_cpu_init();
+
+ggml_backend_t backends[3] = { rpc0, rpc1, cpu };
+ggml_backend_sched_t sched = ggml_backend_sched_new(
+    backends, NULL, 3, GGML_DEFAULT_GRAPH_SIZE, false, true
+);
+```
+
+The scheduler distributes graph nodes across all connected servers based on where the weights live and which operations each backend supports.
+
+## Buffer type
+
+To allocate tensors in the remote device's memory, use the RPC buffer type:
+
+```c
+ggml_backend_buffer_type_t buft =
+    ggml_backend_rpc_buffer_type("192.168.1.10:50052", 0);
+ggml_backend_buffer_t buf =
+    ggml_backend_buft_alloc_buffer(buft, weights_size);
+```
+
+## API summary
+
+| Function | Description |
+|----------|-------------|
+| `ggml_backend_rpc_init(endpoint, device)` | Connect to a remote server and return a backend handle |
+| `ggml_backend_is_rpc(backend)` | Check whether a backend is an RPC backend |
+| `ggml_backend_rpc_buffer_type(endpoint, device)` | Buffer type for remote device memory |
+| `ggml_backend_rpc_get_device_memory(endpoint, device, free, total)` | Query remote device memory |
+| `ggml_backend_rpc_start_server(endpoint, cache_dir, n_threads, n_devices, devices)` | Start an RPC server (blocks) |
+| `ggml_backend_rpc_reg()` | Return the RPC backend registry entry |
+| `ggml_backend_rpc_add_server(endpoint)` | Register a remote server with the global device registry |

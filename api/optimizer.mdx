@@ -1,0 +1,540 @@
+---
+title: "Optimizer API"
+description: "High-level training API with AdamW and SGD optimizers"
+---
+
+The optimizer API provides a complete training loop abstraction on top of GGML's computation graph primitives. It manages graph construction, gradient accumulation, loss computation, and parameter updates in a unified interface.
+
+<Note>
+This module is maintained by Johannes Gäßler. The high-level functions (`ggml_opt_epoch`, `ggml_opt_fit`) are designed to be copied and adapted directly into user code.
+</Note>
+
+## Enums
+
+### ggml_opt_loss_type
+
+Controls how the scalar loss value is derived from the model outputs.
+
+```c
+enum ggml_opt_loss_type {
+    GGML_OPT_LOSS_TYPE_MEAN,
+    GGML_OPT_LOSS_TYPE_SUM,
+    GGML_OPT_LOSS_TYPE_CROSS_ENTROPY,
+    GGML_OPT_LOSS_TYPE_MEAN_SQUARED_ERROR,
+};
+```
+
+| Value | Description |
+|---|---|
+| `GGML_OPT_LOSS_TYPE_MEAN` | Mean of all output values. Useful as a custom loss when you compute the loss yourself within the graph. |
+| `GGML_OPT_LOSS_TYPE_SUM` | Sum of all output values. Like `MEAN` but without dividing by the number of elements. |
+| `GGML_OPT_LOSS_TYPE_CROSS_ENTROPY` | Categorical cross-entropy between outputs (logits) and one-hot labels. The standard choice for classification. |
+| `GGML_OPT_LOSS_TYPE_MEAN_SQUARED_ERROR` | Mean squared error between outputs and labels. The standard choice for regression. |
+
+### ggml_opt_build_type
+
+Controls how much of the computation graph is built.
+
+```c
+enum ggml_opt_build_type {
+    GGML_OPT_BUILD_TYPE_FORWARD = 10, // forward pass only
+    GGML_OPT_BUILD_TYPE_GRAD    = 20, // forward + backward (gradients only)
+    GGML_OPT_BUILD_TYPE_OPT     = 30, // forward + backward + optimizer step
+};
+```
+
+### ggml_opt_optimizer_type
+
+```c
+enum ggml_opt_optimizer_type {
+    GGML_OPT_OPTIMIZER_TYPE_ADAMW,
+    GGML_OPT_OPTIMIZER_TYPE_SGD,
+};
+```
+
+## Optimizer parameters
+
+### ggml_opt_optimizer_params
+
+Holds hyperparameters for both supported optimizers. Only the fields for the active optimizer type are used.
+
+```c
+struct ggml_opt_optimizer_params {
+    struct {
+        float alpha; // learning rate
+        float beta1; // first moment decay (default 0.9)
+        float beta2; // second moment decay (default 0.999)
+        float eps;   // epsilon for numerical stability (default 1e-8)
+        float wd;    // weight decay, 0.0 to disable
+    } adamw;
+    struct {
+        float alpha; // learning rate
+        float wd;    // weight decay
+    } sgd;
+};
+```
+
+**AdamW fields:**
+
+<ParamField path="adamw.alpha" type="float">
+  Learning rate. Controls the step size at each parameter update. Typical values: `1e-4` to `1e-2`.
+</ParamField>
+<ParamField path="adamw.beta1" type="float">
+  Exponential decay rate for the first moment estimate. Default: `0.9`.
+</ParamField>
+<ParamField path="adamw.beta2" type="float">
+  Exponential decay rate for the second moment estimate. Default: `0.999`.
+</ParamField>
+<ParamField path="adamw.eps" type="float">
+  Small constant added to the denominator for numerical stability. Default: `1e-8`.
+</ParamField>
+<ParamField path="adamw.wd" type="float">
+  Weight decay coefficient. Set to `0.0f` to disable. Decoupled weight decay as in the AdamW paper.
+</ParamField>
+
+**SGD fields:**
+
+<ParamField path="sgd.alpha" type="float">
+  Learning rate.
+</ParamField>
+<ParamField path="sgd.wd" type="float">
+  Weight decay.
+</ParamField>
+
+### ggml_opt_get_optimizer_params callback
+
+```c
+typedef struct ggml_opt_optimizer_params (*ggml_opt_get_optimizer_params)(void * userdata);
+```
+
+A function pointer called before each backward pass to obtain the current optimizer hyperparameters. Use this to implement learning rate schedules.
+
+Two built-in implementations are provided:
+
+- **`ggml_opt_get_default_optimizer_params`** — returns hard-coded default values; ignores `userdata`.
+- **`ggml_opt_get_constant_optimizer_params`** — casts `userdata` to `struct ggml_opt_optimizer_params *` and returns it directly.
+
+## ggml_opt_params
+
+Configuration struct for creating an optimization context.
+
+```c
+struct ggml_opt_params {
+    ggml_backend_sched_t   backend_sched; // scheduler defining which backends run the graphs
+    struct ggml_context  * ctx_compute;   // context for temporary compute tensors (optional)
+    struct ggml_tensor   * inputs;        // input tensor (optional, for static graphs)
+    struct ggml_tensor   * outputs;       // output tensor (optional, for static graphs)
+    enum ggml_opt_loss_type  loss_type;
+    enum ggml_opt_build_type build_type;
+    int32_t                  opt_period;  // gradient accumulation steps per optimizer step
+    ggml_opt_get_optimizer_params get_opt_pars;
+    void *                        get_opt_pars_ud; // userdata for get_opt_pars
+    enum ggml_opt_optimizer_type  optimizer;
+};
+```
+
+<ParamField path="backend_sched" type="ggml_backend_sched_t" required>
+  Backend scheduler used to build and execute the forward and backward graphs.
+</ParamField>
+<ParamField path="ctx_compute" type="struct ggml_context *">
+  When set alongside `inputs` and `outputs`, graphs are allocated statically once and reused. When `NULL`, a new graph is built for each evaluation.
+</ParamField>
+<ParamField path="inputs" type="struct ggml_tensor *">
+  Input tensor. The second dimension is interpreted as the batch size (number of datapoints).
+</ParamField>
+<ParamField path="outputs" type="struct ggml_tensor *">
+  Output tensor. Must have shape `[ne_label, ndata_batch]` when labels are used.
+</ParamField>
+<ParamField path="loss_type" type="enum ggml_opt_loss_type" required>
+  Which loss function to minimize.
+</ParamField>
+<ParamField path="build_type" type="enum ggml_opt_build_type" required>
+  Whether to build a forward-only, gradient, or full optimization graph.
+</ParamField>
+<ParamField path="opt_period" type="int32_t">
+  Number of gradient accumulation steps before each optimizer parameter update. Set to `1` for standard SGD/AdamW without accumulation.
+</ParamField>
+<ParamField path="get_opt_pars" type="ggml_opt_get_optimizer_params">
+  Callback invoked before each backward pass to retrieve the current optimizer hyperparameters.
+</ParamField>
+<ParamField path="optimizer" type="enum ggml_opt_optimizer_type" required>
+  Which optimizer to use (`ADAMW` or `SGD`).
+</ParamField>
+
+Get a params struct with sensible defaults using:
+
+```c
+struct ggml_opt_params ggml_opt_default_params(
+    ggml_backend_sched_t    backend_sched,
+    enum ggml_opt_loss_type loss_type);
+```
+
+## Context lifecycle
+
+<AccordionGroup>
+  <Accordion title="ggml_opt_init">
+    Creates and initializes an optimization context.
+
+    ```c
+    ggml_opt_context_t ggml_opt_init(struct ggml_opt_params params);
+    ```
+
+    <ParamField path="params" type="struct ggml_opt_params" required>
+      Configuration for the optimizer. Use `ggml_opt_default_params` to start from sensible defaults.
+    </ParamField>
+
+    Returns a new context. Free with `ggml_opt_free`.
+  </Accordion>
+
+  <Accordion title="ggml_opt_free">
+    Destroys an optimization context and releases all associated memory.
+
+    ```c
+    void ggml_opt_free(ggml_opt_context_t opt_ctx);
+    ```
+
+    <ParamField path="opt_ctx" type="ggml_opt_context_t" required>
+      The context to free.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_opt_reset">
+    Zeroes gradients, resets the loss accumulator, and optionally resets optimizer state (e.g. Adam moment estimates).
+
+    ```c
+    void ggml_opt_reset(ggml_opt_context_t opt_ctx, bool optimizer);
+    ```
+
+    <ParamField path="opt_ctx" type="ggml_opt_context_t" required>
+      The context to reset.
+    </ParamField>
+    <ParamField path="optimizer" type="bool" required>
+      When `true`, also resets the optimizer's internal state (first/second moment estimates for AdamW). Pass `false` to only zero gradients and the loss.
+    </ParamField>
+  </Accordion>
+</AccordionGroup>
+
+## Tensor accessors
+
+These functions return pointers to the internal tensors managed by the optimization context.
+
+<Warning>
+When not using static graphs, these pointers become invalid after the next call to `ggml_opt_alloc`.
+</Warning>
+
+<AccordionGroup>
+  <Accordion title="ggml_opt_inputs">
+    Returns the input tensor of the forward graph.
+
+    ```c
+    struct ggml_tensor * ggml_opt_inputs(ggml_opt_context_t opt_ctx);
+    ```
+  </Accordion>
+
+  <Accordion title="ggml_opt_outputs">
+    Returns the output tensor of the forward graph.
+
+    ```c
+    struct ggml_tensor * ggml_opt_outputs(ggml_opt_context_t opt_ctx);
+    ```
+  </Accordion>
+
+  <Accordion title="ggml_opt_labels">
+    Returns the labels tensor used to compute the loss.
+
+    ```c
+    struct ggml_tensor * ggml_opt_labels(ggml_opt_context_t opt_ctx);
+    ```
+  </Accordion>
+
+  <Accordion title="ggml_opt_loss">
+    Returns the scalar tensor that holds the current loss value after `ggml_opt_eval`.
+
+    ```c
+    struct ggml_tensor * ggml_opt_loss(ggml_opt_context_t opt_ctx);
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Optimization result
+
+`ggml_opt_result_t` accumulates statistics (loss, accuracy, number of datapoints) across multiple evaluation steps.
+
+<AccordionGroup>
+  <Accordion title="ggml_opt_result_init">
+    Creates a new, empty result object.
+
+    ```c
+    ggml_opt_result_t ggml_opt_result_init(void);
+    ```
+
+    Free with `ggml_opt_result_free`.
+  </Accordion>
+
+  <Accordion title="ggml_opt_result_ndata">
+    Writes the total number of datapoints processed into `*ndata`.
+
+    ```c
+    void ggml_opt_result_ndata(
+        ggml_opt_result_t result,
+        int64_t         * ndata);
+    ```
+
+    <ParamField path="result" type="ggml_opt_result_t" required>
+      The result to query.
+    </ParamField>
+    <ParamField path="ndata" type="int64_t *" required>
+      Output: number of datapoints.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_opt_result_loss">
+    Writes the accumulated loss and its standard uncertainty into the output pointers.
+
+    ```c
+    void ggml_opt_result_loss(
+        ggml_opt_result_t result,
+        double          * loss,
+        double          * unc);
+    ```
+
+    <ParamField path="result" type="ggml_opt_result_t" required>
+      The result to query.
+    </ParamField>
+    <ParamField path="loss" type="double *" required>
+      Output: mean loss over all datapoints.
+    </ParamField>
+    <ParamField path="unc" type="double *">
+      Output: standard uncertainty of the loss estimate. Pass `NULL` to ignore.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_opt_result_accuracy">
+    Writes classification accuracy and its standard uncertainty into the output pointers.
+
+    ```c
+    void ggml_opt_result_accuracy(
+        ggml_opt_result_t result,
+        double          * accuracy,
+        double          * unc);
+    ```
+
+    <ParamField path="result" type="ggml_opt_result_t" required>
+      The result to query.
+    </ParamField>
+    <ParamField path="accuracy" type="double *" required>
+      Output: fraction of correctly classified datapoints in `[0, 1]`.
+    </ParamField>
+    <ParamField path="unc" type="double *">
+      Output: standard uncertainty. Pass `NULL` to ignore.
+    </ParamField>
+  </Accordion>
+</AccordionGroup>
+
+## Low-level computation
+
+These functions give you fine-grained control over graph allocation and evaluation. Use them when `ggml_opt_epoch` or `ggml_opt_fit` do not offer enough flexibility.
+
+<AccordionGroup>
+  <Accordion title="ggml_opt_prepare_alloc">
+    Sets the graph, inputs, and outputs for the next call to `ggml_opt_alloc`. Required when not using static graphs.
+
+    ```c
+    void ggml_opt_prepare_alloc(
+        ggml_opt_context_t    opt_ctx,
+        struct ggml_context * ctx_compute,
+        struct ggml_cgraph  * gf,
+        struct ggml_tensor  * inputs,
+        struct ggml_tensor  * outputs);
+    ```
+
+    <ParamField path="opt_ctx" type="ggml_opt_context_t" required>
+      The optimization context.
+    </ParamField>
+    <ParamField path="ctx_compute" type="struct ggml_context *" required>
+      The context containing temporarily allocated compute tensors.
+    </ParamField>
+    <ParamField path="gf" type="struct ggml_cgraph *" required>
+      The forward computation graph.
+    </ParamField>
+    <ParamField path="inputs" type="struct ggml_tensor *" required>
+      Input tensor in `gf`.
+    </ParamField>
+    <ParamField path="outputs" type="struct ggml_tensor *" required>
+      Output tensor in `gf`.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_opt_alloc">
+    Allocates the next graph for evaluation. Must be called exactly once before each call to `ggml_opt_eval`.
+
+    ```c
+    void ggml_opt_alloc(ggml_opt_context_t opt_ctx, bool backward);
+    ```
+
+    <ParamField path="opt_ctx" type="ggml_opt_context_t" required>
+      The optimization context.
+    </ParamField>
+    <ParamField path="backward" type="bool" required>
+      When `true`, the backward graph (for gradient computation and parameter update) is allocated in addition to the forward graph.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_opt_eval">
+    Executes the allocated graph. Performs a forward pass, increments the result, and (if the backward graph was allocated) performs the backward pass.
+
+    ```c
+    void ggml_opt_eval(ggml_opt_context_t opt_ctx, ggml_opt_result_t result);
+    ```
+
+    <ParamField path="opt_ctx" type="ggml_opt_context_t" required>
+      The optimization context.
+    </ParamField>
+    <ParamField path="result" type="ggml_opt_result_t">
+      Result object to increment with the statistics from this evaluation. Pass `NULL` to discard statistics.
+    </ParamField>
+  </Accordion>
+</AccordionGroup>
+
+## High-level training API
+
+### ggml_opt_epoch_callback
+
+A callback invoked after each batch evaluation during `ggml_opt_epoch`.
+
+```c
+typedef void (*ggml_opt_epoch_callback)(
+    bool               train,       // true = training batch, false = validation batch
+    ggml_opt_context_t opt_ctx,
+    ggml_opt_dataset_t dataset,
+    ggml_opt_result_t  result,      // result for the current dataset subsection
+    int64_t            ibatch,      // batches evaluated so far
+    int64_t            ibatch_max,  // total batches in this subsection
+    int64_t            t_start_us); // start time in microseconds
+```
+
+A built-in implementation `ggml_opt_epoch_callback_progress_bar` prints a progress bar to stderr.
+
+<AccordionGroup>
+  <Accordion title="ggml_opt_epoch">
+    Runs one epoch: trains on the front portion of the dataset and evaluates on the back portion.
+
+    ```c
+    void ggml_opt_epoch(
+        ggml_opt_context_t      opt_ctx,
+        ggml_opt_dataset_t      dataset,
+        ggml_opt_result_t       result_train,
+        ggml_opt_result_t       result_eval,
+        int64_t                 idata_split,
+        ggml_opt_epoch_callback callback_train,
+        ggml_opt_epoch_callback callback_eval);
+    ```
+
+    <ParamField path="opt_ctx" type="ggml_opt_context_t" required>
+      The optimization context.
+    </ParamField>
+    <ParamField path="dataset" type="ggml_opt_dataset_t" required>
+      The dataset to iterate over.
+    </ParamField>
+    <ParamField path="result_train" type="ggml_opt_result_t">
+      Result object incremented during the training portion. Pass `NULL` to discard.
+    </ParamField>
+    <ParamField path="result_eval" type="ggml_opt_result_t">
+      Result object incremented during the validation portion. Pass `NULL` to discard.
+    </ParamField>
+    <ParamField path="idata_split" type="int64_t" required>
+      Datapoint index that separates training (indices `[0, idata_split)`) from validation (indices `[idata_split, ndata)`).
+    </ParamField>
+    <ParamField path="callback_train" type="ggml_opt_epoch_callback">
+      Called after each training batch. Pass `NULL` for no callback.
+    </ParamField>
+    <ParamField path="callback_eval" type="ggml_opt_epoch_callback">
+      Called after each validation batch. Pass `NULL` for no callback.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="ggml_opt_fit">
+    Fits the model to a dataset over multiple epochs. This is the highest-level training entry point.
+
+    ```c
+    void ggml_opt_fit(
+        ggml_backend_sched_t          backend_sched,
+        struct ggml_context         * ctx_compute,
+        struct ggml_tensor          * inputs,
+        struct ggml_tensor          * outputs,
+        ggml_opt_dataset_t            dataset,
+        enum ggml_opt_loss_type       loss_type,
+        enum ggml_opt_optimizer_type  optimizer,
+        ggml_opt_get_optimizer_params get_opt_pars,
+        int64_t                       nepoch,
+        int64_t                       nbatch_logical,
+        float                         val_split,
+        bool                          silent);
+    ```
+
+    <ParamField path="backend_sched" type="ggml_backend_sched_t" required>
+      Backend scheduler used to build and run the compute graphs.
+    </ParamField>
+    <ParamField path="ctx_compute" type="struct ggml_context *" required>
+      Context containing temporarily allocated tensors for the forward pass.
+    </ParamField>
+    <ParamField path="inputs" type="struct ggml_tensor *" required>
+      Input tensor with shape `[ne_datapoint, ndata_batch]`.
+    </ParamField>
+    <ParamField path="outputs" type="struct ggml_tensor *" required>
+      Output tensor. Must have shape `[ne_label, ndata_batch]` when labels are used.
+    </ParamField>
+    <ParamField path="dataset" type="ggml_opt_dataset_t" required>
+      Dataset containing training data and optionally labels.
+    </ParamField>
+    <ParamField path="loss_type" type="enum ggml_opt_loss_type" required>
+      The loss function to minimize.
+    </ParamField>
+    <ParamField path="optimizer" type="enum ggml_opt_optimizer_type" required>
+      Which optimizer to use.
+    </ParamField>
+    <ParamField path="get_opt_pars" type="ggml_opt_get_optimizer_params" required>
+      Callback to retrieve optimizer hyperparameters. The `userdata` passed is a pointer to the current epoch number (`int64_t *`).
+    </ParamField>
+    <ParamField path="nepoch" type="int64_t" required>
+      Number of times to iterate over the full dataset.
+    </ParamField>
+    <ParamField path="nbatch_logical" type="int64_t" required>
+      Number of datapoints per logical optimizer step. Must be a multiple of the physical batch size (second dimension of `inputs`/`outputs`).
+    </ParamField>
+    <ParamField path="val_split" type="float" required>
+      Fraction of the dataset reserved for validation. Must be in `[0.0, 1.0)`. Pass `0.0` to skip validation.
+    </ParamField>
+    <ParamField path="silent" type="bool" required>
+      When `true`, suppresses all progress output to stderr.
+    </ParamField>
+  </Accordion>
+</AccordionGroup>
+
+### Recommended usage pattern
+
+```c
+// 1. Choose a loss for your problem
+//    - Classification: GGML_OPT_LOSS_TYPE_CROSS_ENTROPY
+//    - Regression:     GGML_OPT_LOSS_TYPE_MEAN_SQUARED_ERROR
+
+// 2. Build model graph (no_alloc = true; two contexts: one for weights, one for compute)
+struct ggml_tensor * inputs  = ggml_new_tensor_2d(ctx_params, GGML_TYPE_F32, ne_input,  ndata_batch);
+struct ggml_tensor * outputs = ggml_new_tensor_2d(ctx_compute, GGML_TYPE_F32, ne_output, ndata_batch);
+// ... build the graph that connects inputs -> outputs ...
+
+// 3. Create dataset
+ggml_opt_dataset_t dataset = ggml_opt_dataset_init(...);
+// ... populate dataset->data and dataset->labels ...
+
+// 4. Fit
+ggml_opt_fit(
+    backend_sched, ctx_compute, inputs, outputs, dataset,
+    GGML_OPT_LOSS_TYPE_CROSS_ENTROPY,
+    GGML_OPT_OPTIMIZER_TYPE_ADAMW,
+    ggml_opt_get_default_optimizer_params,
+    /*nepoch=*/        10,
+    /*nbatch_logical=*/256,
+    /*val_split=*/     0.1f,
+    /*silent=*/        false);
+```

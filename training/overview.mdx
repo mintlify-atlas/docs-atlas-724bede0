@@ -1,0 +1,196 @@
+---
+title: "Training overview"
+description: "Train models using ggml's optimization API"
+---
+
+ggml provides a high-level training API through `ggml-opt.h`. It handles dataset batching, gradient accumulation, forward and backward passes, and optimizer steps — so you can focus on defining your model graph.
+
+## Workflow
+
+<Steps>
+  <Step title="Select a loss type">
+    Choose the loss function that matches your problem. The built-in options cover most supervised learning tasks:
+
+    ```c
+    enum ggml_opt_loss_type {
+        GGML_OPT_LOSS_TYPE_MEAN,              // reduce outputs to mean (custom loss via graph)
+        GGML_OPT_LOSS_TYPE_SUM,               // reduce outputs to sum (custom loss via graph)
+        GGML_OPT_LOSS_TYPE_CROSS_ENTROPY,     // classification
+        GGML_OPT_LOSS_TYPE_MEAN_SQUARED_ERROR // regression
+    };
+    ```
+
+    Use `MEAN` or `SUM` when your graph already computes a meaningful scalar loss and you only need the optimizer to minimize it.
+  </Step>
+
+  <Step title="Create a dataset">
+    Allocate a dataset and populate its `data` and `labels` tensors with your training samples. See [Datasets](/training/datasets) for full details.
+
+    ```c
+    ggml_opt_dataset_t dataset = ggml_opt_dataset_init(
+        GGML_TYPE_F32, // type for data tensor
+        GGML_TYPE_F32, // type for labels tensor
+        ne_datapoint,  // elements per datapoint
+        ne_label,      // elements per label
+        ndata,         // total number of datapoints
+        ndata_shard    // shuffle granularity
+    );
+    ```
+  </Step>
+
+  <Step title="Build a GGML graph">
+    Define your model as a GGML computation graph with `no_alloc = true`. Use two separate contexts:
+
+    - **Parameters context** — holds model weights and the `inputs` tensor. Allocate this statically in your code; its data remains valid throughout training.
+    - **Compute context** — holds all intermediate tensors. The optimizer reallocates this context automatically; do not read its tensor data directly.
+
+    ```c
+    // Parameters context — allocated once
+    struct ggml_init_params params_ctx = {
+        .mem_size   = model_mem_size,
+        .mem_buffer = NULL,
+        .no_alloc   = false,
+    };
+    struct ggml_context * ctx_model = ggml_init(params_ctx);
+
+    struct ggml_tensor * inputs  = ggml_new_tensor_2d(ctx_model, GGML_TYPE_F32, ne_input,  ndata_batch);
+    struct ggml_tensor * weights = ggml_new_tensor_2d(ctx_model, GGML_TYPE_F32, ne_hidden, ne_input);
+
+    // Compute context — reused each step
+    struct ggml_init_params compute_ctx = {
+        .mem_size   = compute_mem_size,
+        .mem_buffer = NULL,
+        .no_alloc   = true, // no_alloc must be true
+    };
+    struct ggml_context * ctx_compute = ggml_init(compute_ctx);
+
+    struct ggml_tensor * hidden  = ggml_mul_mat(ctx_compute, weights, inputs);
+    struct ggml_tensor * outputs = ggml_relu(ctx_compute, hidden);
+    ```
+
+    <Note>
+      The second dimension of `inputs` and `outputs` is interpreted as the batch size (number of datapoints). Make sure it matches `ndata_batch` in your dataset batching.
+    </Note>
+  </Step>
+
+  <Step title="Fit the model">
+    Call `ggml_opt_fit` to run the full training loop. It handles shuffling, batching, gradient accumulation, validation splits, and epoch reporting.
+
+    ```c
+    ggml_opt_fit(
+        backend_sched,                       // backend scheduler
+        ctx_compute,                         // compute context
+        inputs,                              // input tensor
+        outputs,                             // output tensor
+        dataset,                             // dataset
+        GGML_OPT_LOSS_TYPE_CROSS_ENTROPY,    // loss function
+        GGML_OPT_OPTIMIZER_TYPE_ADAMW,       // optimizer
+        ggml_opt_get_default_optimizer_params, // optimizer params callback
+        /*nepoch=*/30,                        // number of epochs
+        /*nbatch_logical=*/500,               // datapoints per optimizer step
+        /*val_split=*/0.05f,                  // 5% held out for validation
+        /*silent=*/false                     // print progress to stderr
+    );
+    ```
+
+    For more control over the loop — custom callbacks, per-batch metrics, or mid-epoch checkpointing — use [`ggml_opt_epoch`](/training/datasets#custom-training-loops) instead.
+  </Step>
+</Steps>
+
+## `ggml_opt_fit` parameters
+
+```c
+void ggml_opt_fit(
+    ggml_backend_sched_t          backend_sched,
+    struct ggml_context         * ctx_compute,
+    struct ggml_tensor          * inputs,
+    struct ggml_tensor          * outputs,
+    ggml_opt_dataset_t            dataset,
+    enum ggml_opt_loss_type       loss_type,
+    enum ggml_opt_optimizer_type  optimizer,
+    ggml_opt_get_optimizer_params get_opt_pars,
+    int64_t                       nepoch,
+    int64_t                       nbatch_logical,
+    float                         val_split,
+    bool                          silent);
+```
+
+| Parameter | Description |
+|---|---|
+| `backend_sched` | Backend scheduler that controls which device(s) execute the compute graphs. |
+| `ctx_compute` | GGML context holding the temporary (non-parameter) tensors of your graph. Must have been created with `no_alloc = true`. |
+| `inputs` | Input tensor. Shape must be `[ne_datapoint, ndata_batch]`. |
+| `outputs` | Output tensor. When labels are used, shape must be `[ne_label, ndata_batch]`. |
+| `dataset` | Dataset created with `ggml_opt_dataset_init`. |
+| `loss_type` | Loss function to minimize. |
+| `optimizer` | `GGML_OPT_OPTIMIZER_TYPE_ADAMW` or `GGML_OPT_OPTIMIZER_TYPE_SGD`. |
+| `get_opt_pars` | Callback invoked before each backward pass to supply optimizer hyperparameters. The `userdata` pointer passed to this callback is a pointer to the current epoch number (`int64_t`), which enables learning rate schedules. |
+| `nepoch` | Number of full passes over the training portion of the dataset. |
+| `nbatch_logical` | Number of datapoints between optimizer steps. Must be a multiple of the physical batch size (the second dimension of `inputs`). Values larger than the physical batch trigger gradient accumulation. |
+| `val_split` | Fraction of the dataset reserved for validation. Must be in `[0.0, 1.0)`. Pass `0.0f` to skip validation. |
+| `silent` | When `true`, suppresses all progress output to `stderr`. |
+
+## Static vs dynamic graph allocation
+
+The optimizer context supports two graph allocation modes:
+
+<Tabs>
+  <Tab title="Static allocation">
+    Set `ctx_compute`, `inputs`, and `outputs` on the `ggml_opt_params` struct **before** calling `ggml_opt_init`. The optimizer allocates the forward, gradient, and optimizer graphs once at initialization and reuses them for every evaluation.
+
+    This is the mode used by `ggml_opt_fit`. Prefer static allocation when the graph topology is fixed across all batches.
+
+    ```c
+    struct ggml_opt_params params = ggml_opt_default_params(sched, loss_type);
+    params.ctx_compute = ctx_compute;
+    params.inputs      = inputs;
+    params.outputs     = outputs;
+
+    ggml_opt_context_t opt_ctx = ggml_opt_init(params);
+    // graphs are allocated once here — no per-step reallocation
+    ```
+  </Tab>
+  <Tab title="Dynamic allocation">
+    Leave `ctx_compute`, `inputs`, and `outputs` unset (NULL). Before each evaluation, call `ggml_opt_prepare_alloc` to register the current graph, then `ggml_opt_alloc` to allocate it.
+
+    Use dynamic allocation when the graph changes between steps, for example in models with variable-length inputs.
+
+    ```c
+    // Per-step dynamic allocation
+    ggml_opt_prepare_alloc(opt_ctx, ctx_compute, gf, inputs, outputs);
+    ggml_opt_alloc(opt_ctx, /*backward=*/true);
+    ggml_opt_eval(opt_ctx, result);
+    ```
+
+    <Warning>
+      With dynamic allocation, the tensor pointers returned by `ggml_opt_inputs`, `ggml_opt_outputs`, and related functions become invalid after the next call to `ggml_opt_alloc`.
+    </Warning>
+  </Tab>
+</Tabs>
+
+## Build types
+
+The `build_type` field on `ggml_opt_params` controls which graphs the optimizer constructs:
+
+```c
+enum ggml_opt_build_type {
+    GGML_OPT_BUILD_TYPE_FORWARD = 10, // forward pass only (inference)
+    GGML_OPT_BUILD_TYPE_GRAD    = 20, // forward + backward (gradient computation)
+    GGML_OPT_BUILD_TYPE_OPT     = 30, // forward + backward + optimizer step (full training)
+};
+```
+
+| Build type | Use case |
+|---|---|
+| `FORWARD` | Evaluation or inference — no gradients computed. |
+| `GRAD` | Compute gradients without applying an optimizer step. Useful for inspecting gradients or implementing custom update rules. |
+| `OPT` | Full training: forward pass, backward pass, and optimizer parameter update. This is the default for `ggml_opt_fit`. |
+
+<CardGroup cols={2}>
+  <Card title="Optimizers" icon="sliders" href="/training/optimizers">
+    Configure AdamW and SGD, set learning rate schedules, and manage the optimizer context.
+  </Card>
+  <Card title="Datasets" icon="database" href="/training/datasets">
+    Initialize datasets, populate tensors, shuffle data, and write custom epoch callbacks.
+  </Card>
+</CardGroup>

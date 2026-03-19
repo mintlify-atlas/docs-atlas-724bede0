@@ -1,80 +1,268 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Build ggml from source and run your first computation."
 ---
 
-## Get started in three steps
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/ggml-org/ggml
+    cd ggml
+    ```
+  </Step>
 
-Get your documentation site running locally and make your first customization.
+  <Step title="Install Python dependencies (optional)">
+    Some examples require Python tooling to download model weights. Skip this
+    step if you only want to build the library.
 
-### Step 1: Set up your local environment
+    ```bash
+    python3.10 -m venv .venv
+    source .venv/bin/activate
+    pip install -r requirements.txt
+    ```
+  </Step>
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+  <Step title="Build with CMake">
+    <CodeGroup>
 
-### Step 2: Deploy your changes
+    ```bash Linux / macOS
+    mkdir build && cd build
+    cmake ..
+    cmake --build . --config Release -j 8
+    ```
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```bash Windows (MSVC)
+    mkdir build
+    cd build
+    cmake .. -G "Visual Studio 17 2022" -A x64
+    cmake --build . --config Release
+    ```
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    </CodeGroup>
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    Compiled binaries are placed in `build/bin/`.
+  </Step>
 
-### Step 3: Go live
+  <Step title="Run the simple example">
+    The `simple-ctx` example performs a matrix multiplication using the CPU
+    backend.
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    ```bash
+    ./build/bin/simple-ctx
+    ```
 
-## Next steps
+    Expected output:
 
-Now that you have your docs running, explore these key features:
+    ```
+    mul mat (4 x 3) (transposed result):
+    [  60.00  90.00  42.00
+       55.00  54.00  29.00
+       50.00  54.00  28.00
+      110.00 126.00  64.00 ]
+    ```
+  </Step>
+</Steps>
 
-<CardGroup cols={2}>
+## Working examples
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
+The two `simple` examples demonstrate the two main APIs.
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
+<Tabs>
+  <Tab title="simple-ctx (legacy CPU API)">
+    This example allocates a context that owns tensor data, builds a matrix
+    multiplication graph, and executes it on the CPU.
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
+    ```cpp simple-ctx.cpp
+    #include "ggml.h"
+    #include "ggml-cpu.h"
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
+    #include <cassert>
+    #include <cstdio>
+    #include <cstring>
+    #include <vector>
 
-</CardGroup>
+    struct simple_model {
+        struct ggml_tensor * a;
+        struct ggml_tensor * b;
+        struct ggml_context * ctx;
+    };
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+    void load_model(simple_model & model, float * a, float * b,
+                    int rows_A, int cols_A, int rows_B, int cols_B) {
+        size_t ctx_size = 0;
+        ctx_size += rows_A * cols_A * ggml_type_size(GGML_TYPE_F32);
+        ctx_size += rows_B * cols_B * ggml_type_size(GGML_TYPE_F32);
+        ctx_size += 2 * ggml_tensor_overhead();
+        ctx_size += ggml_graph_overhead();
+        ctx_size += 1024;
+
+        struct ggml_init_params params {
+            /*.mem_size   =*/ ctx_size,
+            /*.mem_buffer =*/ NULL,
+            /*.no_alloc   =*/ false,
+        };
+
+        model.ctx = ggml_init(params);
+        model.a = ggml_new_tensor_2d(model.ctx, GGML_TYPE_F32, cols_A, rows_A);
+        model.b = ggml_new_tensor_2d(model.ctx, GGML_TYPE_F32, cols_B, rows_B);
+        memcpy(model.a->data, a, ggml_nbytes(model.a));
+        memcpy(model.b->data, b, ggml_nbytes(model.b));
+    }
+
+    struct ggml_cgraph * build_graph(const simple_model & model) {
+        struct ggml_cgraph * gf = ggml_new_graph(model.ctx);
+        // result = a * b^T
+        struct ggml_tensor * result = ggml_mul_mat(model.ctx, model.a, model.b);
+        ggml_build_forward_expand(gf, result);
+        return gf;
+    }
+
+    struct ggml_tensor * compute(const simple_model & model) {
+        struct ggml_cgraph * gf = build_graph(model);
+        ggml_graph_compute_with_ctx(model.ctx, gf, /*n_threads=*/1);
+        return ggml_graph_node(gf, -1);
+    }
+
+    int main(void) {
+        ggml_time_init();
+
+        const int rows_A = 4, cols_A = 2;
+        float matrix_A[rows_A * cols_A] = { 2, 8, 5, 1, 4, 2, 8, 6 };
+
+        const int rows_B = 3, cols_B = 2;
+        float matrix_B[rows_B * cols_B] = { 10, 5, 9, 9, 5, 4 };
+
+        simple_model model;
+        load_model(model, matrix_A, matrix_B, rows_A, cols_A, rows_B, cols_B);
+
+        struct ggml_tensor * result = compute(model);
+
+        std::vector<float> out_data(ggml_nelements(result));
+        memcpy(out_data.data(), result->data, ggml_nbytes(result));
+
+        printf("mul mat (%d x %d) (transposed result):\n[",
+               (int)result->ne[0], (int)result->ne[1]);
+        for (int j = 0; j < result->ne[1]; j++) {
+            if (j > 0) printf("\n");
+            for (int i = 0; i < result->ne[0]; i++)
+                printf(" %.2f", out_data[j * result->ne[0] + i]);
+        }
+        printf(" ]\n");
+
+        ggml_free(model.ctx);
+        return 0;
+    }
+    ```
+
+    **Key points:**
+    - `ggml_init()` creates a context that owns tensor memory (`no_alloc = false`).
+    - `ggml_new_tensor_2d()` allocates a tensor inside the context.
+    - `ggml_mul_mat()` records the operation in the graph — no computation yet.
+    - `ggml_graph_compute_with_ctx()` executes the graph on the CPU.
+    - `ggml_free()` releases the entire context and all its tensors.
+  </Tab>
+
+  <Tab title="simple-backend (modern multi-backend API)">
+    This example uses the backend scheduler to automatically dispatch work to
+    the best available device (GPU if available, otherwise CPU).
+
+    ```cpp simple-backend.cpp
+    #include "ggml.h"
+    #include "ggml-backend.h"
+
+    #include <cstdio>
+    #include <cstring>
+    #include <vector>
+
+    struct simple_model {
+        struct ggml_tensor * a {};
+        struct ggml_tensor * b {};
+        ggml_backend_t backend {};
+        ggml_backend_t cpu_backend {};
+        ggml_backend_sched_t sched {};
+        std::vector<uint8_t> buf;
+    };
+
+    const int rows_A = 4, cols_A = 2;
+    float matrix_A[rows_A * cols_A] = { 2, 8, 5, 1, 4, 2, 8, 6 };
+    const int rows_B = 3, cols_B = 2;
+    float matrix_B[rows_B * cols_B] = { 10, 5, 9, 9, 5, 4 };
+
+    void init_model(simple_model & model) {
+        ggml_backend_load_all();
+        model.backend     = ggml_backend_init_best();
+        model.cpu_backend = ggml_backend_init_by_type(
+                                GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+        ggml_backend_t backends[2] = { model.backend, model.cpu_backend };
+        model.sched = ggml_backend_sched_new(
+                          backends, nullptr, 2,
+                          GGML_DEFAULT_GRAPH_SIZE, false, true);
+    }
+
+    struct ggml_cgraph * build_graph(simple_model & model) {
+        size_t buf_size = ggml_tensor_overhead() * GGML_DEFAULT_GRAPH_SIZE
+                        + ggml_graph_overhead();
+        model.buf.resize(buf_size);
+
+        struct ggml_init_params params0 = {
+            /*.mem_size   =*/ buf_size,
+            /*.mem_buffer =*/ model.buf.data(),
+            /*.no_alloc   =*/ true, // tensors allocated later by the scheduler
+        };
+        struct ggml_context * ctx = ggml_init(params0);
+        struct ggml_cgraph  * gf  = ggml_new_graph(ctx);
+
+        model.a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cols_A, rows_A);
+        model.b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cols_B, rows_B);
+        struct ggml_tensor * result = ggml_mul_mat(ctx, model.a, model.b);
+        ggml_build_forward_expand(gf, result);
+        ggml_free(ctx);
+        return gf;
+    }
+
+    struct ggml_tensor * compute(simple_model & model, struct ggml_cgraph * gf) {
+        ggml_backend_sched_reset(model.sched);
+        ggml_backend_sched_alloc_graph(model.sched, gf);
+
+        // upload data from CPU memory to backend buffer
+        ggml_backend_tensor_set(model.a, matrix_A, 0, ggml_nbytes(model.a));
+        ggml_backend_tensor_set(model.b, matrix_B, 0, ggml_nbytes(model.b));
+
+        ggml_backend_sched_graph_compute(model.sched, gf);
+        return ggml_graph_node(gf, -1);
+    }
+
+    int main(void) {
+        ggml_time_init();
+        simple_model model;
+        init_model(model);
+        struct ggml_cgraph * gf = build_graph(model);
+        struct ggml_tensor * result = compute(model, gf);
+
+        std::vector<float> out_data(ggml_nelements(result));
+        ggml_backend_tensor_get(result, out_data.data(), 0, ggml_nbytes(result));
+
+        printf("mul mat (%d x %d) (transposed result):\n[",
+               (int)result->ne[0], (int)result->ne[1]);
+        for (int j = 0; j < result->ne[1]; j++) {
+            if (j > 0) printf("\n");
+            for (int i = 0; i < result->ne[0]; i++)
+                printf(" %.2f", out_data[j * result->ne[0] + i]);
+        }
+        printf(" ]\n");
+
+        ggml_backend_sched_free(model.sched);
+        ggml_backend_free(model.backend);
+        ggml_backend_free(model.cpu_backend);
+        return 0;
+    }
+    ```
+
+    **Key differences from simple-ctx:**
+    - `ggml_backend_load_all()` discovers all compiled backends at startup.
+    - `ggml_backend_init_best()` picks the highest-priority available device.
+    - The context is created with `no_alloc = true`; the scheduler allocates
+      tensors on the appropriate device.
+    - `ggml_backend_tensor_set/get` transfer data between CPU and device memory.
+  </Tab>
+</Tabs>

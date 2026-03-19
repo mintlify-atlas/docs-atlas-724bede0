@@ -1,0 +1,199 @@
+---
+title: "Optimizers"
+description: "Configure AdamW and SGD optimizers"
+---
+
+ggml provides two built-in optimizers: AdamW and SGD. Both are configured through the `ggml_opt_optimizer_params` struct and supplied to the optimizer context via a callback.
+
+## Optimizer types
+
+```c
+enum ggml_opt_optimizer_type {
+    GGML_OPT_OPTIMIZER_TYPE_ADAMW,
+    GGML_OPT_OPTIMIZER_TYPE_SGD,
+};
+```
+
+<Tabs>
+  <Tab title="AdamW">
+    AdamW is the recommended default for most deep learning tasks. It maintains per-parameter first and second moment estimates and applies decoupled weight decay.
+
+    ```c
+    struct ggml_opt_optimizer_params params;
+    params.adamw.alpha = 0.001f;  // learning rate
+    params.adamw.beta1 = 0.9f;    // first moment decay (momentum)
+    params.adamw.beta2 = 0.999f;  // second moment decay
+    params.adamw.eps   = 1e-8f;   // epsilon for numerical stability
+    params.adamw.wd    = 0.1f;    // weight decay (0.0f to disable)
+    ```
+
+    | Field | Description |
+    |---|---|
+    | `alpha` | Learning rate. Controls the step size applied to each parameter update. |
+    | `beta1` | Exponential decay rate for the first moment (mean of gradients). Typical value: `0.9`. |
+    | `beta2` | Exponential decay rate for the second moment (uncentered variance of gradients). Typical value: `0.999`. |
+    | `eps` | Small constant added to the denominator to prevent division by zero. Typical value: `1e-8`. |
+    | `wd` | Weight decay coefficient. Applied directly to parameters (decoupled from the gradient update). Set to `0.0f` to disable. |
+
+    <Note>
+      AdamW requires two additional momentum tensors (`m` and `v`) per trainable parameter tensor. This increases memory usage relative to SGD.
+    </Note>
+  </Tab>
+  <Tab title="SGD">
+    SGD (stochastic gradient descent) is a simpler optimizer with lower memory overhead. It applies a scaled gradient update with optional weight decay.
+
+    ```c
+    struct ggml_opt_optimizer_params params;
+    params.sgd.alpha = 0.01f;  // learning rate
+    params.sgd.wd    = 0.0f;   // weight decay (0.0f to disable)
+    ```
+
+    | Field | Description |
+    |---|---|
+    | `alpha` | Learning rate. |
+    | `wd` | Weight decay coefficient. Set to `0.0f` to disable. |
+  </Tab>
+</Tabs>
+
+## Optimizer params callbacks
+
+The optimizer does not read `ggml_opt_optimizer_params` directly. Instead, it calls a `ggml_opt_get_optimizer_params` callback before each backward pass, allowing you to change hyperparameters dynamically during training (for example, to implement a learning rate schedule).
+
+```c
+// Callback signature
+typedef struct ggml_opt_optimizer_params (*ggml_opt_get_optimizer_params)(void * userdata);
+```
+
+The `userdata` pointer carries arbitrary context to the callback. When using `ggml_opt_fit`, `userdata` is a pointer to the current epoch number (`int64_t *`).
+
+### Built-in callbacks
+
+```c
+// Returns hard-coded default values. userdata is ignored.
+struct ggml_opt_optimizer_params ggml_opt_get_default_optimizer_params(void * userdata);
+
+// Casts userdata to ggml_opt_optimizer_params * and returns the pointed-to struct.
+struct ggml_opt_optimizer_params ggml_opt_get_constant_optimizer_params(void * userdata);
+```
+
+Use `ggml_opt_get_constant_optimizer_params` when you want to supply fixed hyperparameters without writing a custom callback:
+
+```c
+struct ggml_opt_optimizer_params my_params;
+my_params.adamw.alpha = 3e-4f;
+my_params.adamw.beta1 = 0.9f;
+my_params.adamw.beta2 = 0.999f;
+my_params.adamw.eps   = 1e-8f;
+my_params.adamw.wd    = 0.01f;
+
+ggml_opt_fit(
+    sched, ctx_compute, inputs, outputs, dataset,
+    GGML_OPT_LOSS_TYPE_CROSS_ENTROPY,
+    GGML_OPT_OPTIMIZER_TYPE_ADAMW,
+    ggml_opt_get_constant_optimizer_params, // callback
+    &my_params,                             // passed as userdata
+    nepoch, nbatch_logical, val_split, silent
+);
+```
+
+### Custom learning rate schedule
+
+Because `ggml_opt_fit` passes a pointer to the current epoch as `userdata`, you can implement epoch-dependent schedules:
+
+```c
+struct ggml_opt_optimizer_params lr_schedule(void * userdata) {
+    int64_t epoch = *(int64_t *) userdata;
+
+    // Linear warmup for the first 5 epochs, then constant
+    float base_lr = 1e-3f;
+    float lr = (epoch < 5) ? base_lr * ((float)(epoch + 1) / 5.0f) : base_lr;
+
+    struct ggml_opt_optimizer_params params;
+    params.adamw.alpha = lr;
+    params.adamw.beta1 = 0.9f;
+    params.adamw.beta2 = 0.999f;
+    params.adamw.eps   = 1e-8f;
+    params.adamw.wd    = 0.1f;
+    return params;
+}
+
+// Pass the callback to ggml_opt_fit
+ggml_opt_fit(
+    sched, ctx_compute, inputs, outputs, dataset,
+    GGML_OPT_LOSS_TYPE_CROSS_ENTROPY,
+    GGML_OPT_OPTIMIZER_TYPE_ADAMW,
+    lr_schedule,  // custom callback
+    NULL,         // userdata — ggml_opt_fit supplies the epoch pointer automatically
+    nepoch, nbatch_logical, val_split, silent
+);
+```
+
+<Tip>
+  When using `ggml_opt_epoch` directly (instead of `ggml_opt_fit`), you are responsible for calling your callback and passing `userdata`. The epoch pointer convention only applies to `ggml_opt_fit`.
+</Tip>
+
+## `ggml_opt_params` struct
+
+`ggml_opt_params` configures the full optimization context, including backend, loss, build type, and optimizer.
+
+```c
+struct ggml_opt_params {
+    ggml_backend_sched_t backend_sched; // backend scheduler for compute graphs
+
+    // static graph allocation — set all three or leave all NULL for dynamic
+    struct ggml_context * ctx_compute;
+    struct ggml_tensor  * inputs;
+    struct ggml_tensor  * outputs;
+
+    enum ggml_opt_loss_type  loss_type;
+    enum ggml_opt_build_type build_type;
+
+    int32_t opt_period; // optimizer steps after this many gradient accumulation steps
+
+    ggml_opt_get_optimizer_params get_opt_pars;    // optimizer params callback
+    void *                        get_opt_pars_ud; // userdata for the callback
+
+    enum ggml_opt_optimizer_type optimizer;
+};
+```
+
+Use `ggml_opt_default_params` to get a struct with sensible defaults, then override individual fields:
+
+```c
+struct ggml_opt_params params = ggml_opt_default_params(
+    backend_sched,
+    GGML_OPT_LOSS_TYPE_CROSS_ENTROPY
+);
+
+params.optimizer    = GGML_OPT_OPTIMIZER_TYPE_ADAMW;
+params.opt_period   = 4;    // accumulate 4 batches before each optimizer step
+params.get_opt_pars = lr_schedule;
+```
+
+| Field | Description |
+|---|---|
+| `backend_sched` | Defines which backends are used to construct and execute compute graphs. |
+| `ctx_compute` | Compute context for static graph allocation. Leave NULL for dynamic allocation. |
+| `inputs` / `outputs` | Input and output tensors for static graph allocation. Leave NULL for dynamic allocation. |
+| `loss_type` | Loss function to minimize during training. |
+| `build_type` | Controls which graphs are built: `FORWARD`, `GRAD`, or `OPT`. Default for training is `OPT`. |
+| `opt_period` | Number of gradient accumulation micro-steps between optimizer parameter updates. |
+| `get_opt_pars` | Callback to retrieve optimizer hyperparameters before each backward pass. |
+| `get_opt_pars_ud` | Arbitrary pointer passed as `userdata` to `get_opt_pars`. |
+| `optimizer` | Optimizer algorithm: `ADAMW` or `SGD`. |
+
+## Context lifecycle
+
+```c
+// Initialize an optimizer context from params
+ggml_opt_context_t opt_ctx = ggml_opt_init(params);
+
+// Free all resources associated with the context
+ggml_opt_free(opt_ctx);
+
+// Reset gradients and loss; pass true to also reset optimizer state
+// (e.g. clear Adam momentum accumulators between training runs)
+ggml_opt_reset(opt_ctx, /*optimizer=*/false);
+```
+
+`ggml_opt_reset` with `optimizer = false` clears accumulated gradients and resets the loss scalar without discarding the optimizer's internal momentum state. Pass `true` to perform a full reset, which is equivalent to starting a fresh training run with the same graph.

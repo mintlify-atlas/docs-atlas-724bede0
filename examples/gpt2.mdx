@@ -1,0 +1,210 @@
+---
+title: "GPT-2 inference"
+description: "Run GPT-2 text generation with ggml"
+---
+
+The `examples/gpt-2` directory provides a CPU-based C++ implementation of GPT-2 inference using ggml. It also supports [Cerebras-GPT](https://huggingface.co/cerebras) models.
+
+## Supported models
+
+| Model | Description | Disk size |
+|-------|-------------|----------|
+| 117M | Small | 240 MB |
+| 345M | Medium | 680 MB |
+| 774M | Large | 1.5 GB |
+| 1558M | XL | 3.0 GB |
+
+### Performance (MacBook M1 Pro)
+
+| Model | Time per token |
+|-------|----------------|
+| GPT-2 117M | 5 ms |
+| GPT-2 345M | 12 ms |
+| GPT-2 774M | 23 ms |
+| GPT-2 1558M | 42 ms |
+
+## Build
+
+Build ggml with examples enabled from the repo root:
+
+```bash
+mkdir build && cd build
+cmake .. -DGGML_BUILD_EXAMPLES=ON
+cmake --build . --config Release
+```
+
+This produces `build/bin/gpt-2` and `build/bin/gpt-2-quantize`.
+
+## Getting a model
+
+There are three ways to obtain a GPT-2 model in ggml format:
+
+<Tabs>
+  <Tab title="Download pre-converted">
+    The fastest option — download a pre-converted ggml binary directly:
+
+    ```bash
+    cd build
+    ../examples/gpt-2/download-ggml-model.sh 117M
+    ```
+
+    ```
+    Downloading ggml model 117M ...
+    models/gpt-2-117M/ggml-model.bin  100%[======>] 239.58M  8.52MB/s  in 28s
+    Done! Model '117M' saved in 'models/gpt-2-117M/ggml-model.bin'
+    ```
+
+    <Note>
+    Pre-converted models are hosted by the project maintainer and may be removed in the future. Use the conversion scripts as a fallback.
+    </Note>
+  </Tab>
+  <Tab title="Convert from OpenAI checkpoint">
+    Download the original TensorFlow checkpoint and convert it:
+
+    ```bash
+    cd build
+    ../examples/gpt-2/download-model.sh 117M
+    python ../examples/gpt-2/convert-ckpt-to-ggml.py models/gpt-2-117M/ 1
+    ```
+
+    This requires Python and TensorFlow to be installed.
+  </Tab>
+  <Tab title="Convert Cerebras-GPT">
+    Clone a Cerebras model from HuggingFace and convert it:
+
+    ```bash
+    cd build
+    git clone https://huggingface.co/cerebras/Cerebras-GPT-111M models/
+    python ../examples/gpt-2/convert-cerebras-to-ggml.py models/Cerebras-GPT-111M/
+    ```
+  </Tab>
+</Tabs>
+
+## Run inference
+
+Generate text from a prompt:
+
+```bash
+./bin/gpt-2 -m models/gpt-2-117M/ggml-model.bin -p "This is an example"
+```
+
+With no prompt specified, the model generates from a random starting token.
+
+### CLI options
+
+```
+usage: ./bin/gpt-2 [options]
+
+options:
+  -h, --help              show this help message and exit
+  -s SEED, --seed SEED    RNG seed (default: -1)
+  -t N, --threads N       number of threads (default: 8)
+  -p PROMPT, --prompt PROMPT
+                          prompt to start generation with (default: random)
+  -n N, --n_predict N     number of tokens to predict (default: 200)
+  --top_k N               top-k sampling (default: 40)
+  --top_p N               top-p sampling (default: 0.9)
+  --temp N                temperature (default: 1.0)
+  -b N, --batch_size N    batch size for prompt processing (default: 8)
+  -m FNAME, --model FNAME model path (default: models/gpt-2-117M/ggml-model.bin)
+```
+
+### Sample output
+
+```
+gpt2_model_load: loading model from 'models/gpt-2-117M/ggml-model.bin'
+gpt2_model_load: n_vocab = 50257
+gpt2_model_load: n_ctx   = 1024
+gpt2_model_load: n_embd  = 768
+gpt2_model_load: n_head  = 12
+gpt2_model_load: n_layer = 12
+gpt2_model_load: f16     = 1
+gpt2_model_load: ggml ctx size = 311.12 MB
+gpt2_model_load: memory size =  72.00 MB, n_mem = 12288
+gpt2_model_load: model size  = 239.08 MB
+main: number of tokens in prompt = 1
+
+So this is going to be the end of the line for us.
+
+If the Dolphins continue to do their business, it's possible that the team
+could make a bid to bring in new defensive coordinator Scott Linehan.
+
+main: mem per token =  2048612 bytes
+main:     load time =   106.32 ms
+main:   sample time =     7.10 ms
+main:  predict time =   506.40 ms / 5.06 ms per token
+main:    total time =   629.84 ms
+```
+
+## Quantization
+
+You can quantize a converted model to reduce memory usage. Quantization is most useful for large models — applying it to small models (117M, 345M) will significantly reduce quality.
+
+```bash
+# Quantize GPT-2 F16 to Q4_0 (faster, less precise)
+./bin/gpt-2-quantize \
+    models/gpt-2-1558M/ggml-model-f16.bin \
+    models/gpt-2-1558M/ggml-model-q4_0.bin \
+    2
+
+./bin/gpt-2 -m models/gpt-2-1558M/ggml-model-q4_0.bin -p "This is an example"
+```
+
+```bash
+# Quantize Cerebras F16 to Q4_1 (slower, more precise)
+./bin/gpt-2-quantize \
+    models/Cerebras-GPT-6.7B/ggml-model-f16.bin \
+    models/Cerebras-GPT-6.7B/ggml-model-q4_1.bin \
+    3
+
+./bin/gpt-2 -m models/Cerebras-GPT-6.7B/ggml-model-q4_1.bin -p "This is an example"
+```
+
+<Warning>
+For smaller models (117M, 345M), 4-bit quantization will render the model nearly useless. Only quantize models of 774M parameters or larger.
+</Warning>
+
+## Batched generation
+
+The `gpt-2-batched` binary generates multiple independent sequences from the same prompt in a single forward pass:
+
+```bash
+./bin/gpt-2-batched \
+    -np 5 \
+    -m models/gpt-2-117M/ggml-model.bin \
+    -p "Hello my name is" \
+    -n 50
+```
+
+Sample output (5 sequences):
+
+```
+sequence 0:
+Hello my name is John. You can call me any way you want...
+
+sequence 1:
+Hello my name is Robert, and I want to say that we're proud...
+
+sequence 2:
+Hello my name is Jack. I'm the one who created you...
+```
+
+## Inference workflow
+
+<Steps>
+  <Step title="Load the model">
+    The model is loaded from a binary file. The loader reads the vocabulary (50257 tokens for GPT-2), hyperparameters (`n_ctx`, `n_embd`, `n_head`, `n_layer`), and weight tensors into a ggml context.
+  </Step>
+  <Step title="Tokenize the prompt">
+    The input string is split into BPE tokens using the embedded GPT-2 vocabulary. The number of tokens is printed at startup (`number of tokens in prompt`).
+  </Step>
+  <Step title="Run the forward pass">
+    Tokens are processed in batches (`-b`). For each new token, the model runs a full transformer forward pass: token embedding → N transformer blocks (self-attention + FFN) → output projection → softmax.
+  </Step>
+  <Step title="Sample the next token">
+    The output logits are filtered with top-k and top-p sampling, then scaled by temperature before sampling. The sampled token is appended to the sequence and fed back for the next step.
+  </Step>
+  <Step title="Repeat until done">
+    Steps 3–4 repeat until `--n_predict` tokens have been generated or an end-of-text token is produced.
+  </Step>
+</Steps>

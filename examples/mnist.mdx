@@ -1,0 +1,217 @@
+---
+title: "MNIST digit classification"
+description: "Train and evaluate a neural network on MNIST using ggml"
+---
+
+The `examples/mnist` directory shows how to use ggml for both training and inference on the [MNIST handwritten digit dataset](https://yann.lecun.com/exdb/mnist/). Two model architectures are provided: a fully connected network and a convolutional network.
+
+<Warning>
+Training in ggml is a work-in-progress and not production-ready. These examples are intended for learning purposes.
+</Warning>
+
+## Model architectures
+
+<CardGroup cols={2}>
+  <Card title="Fully connected" icon="network-wired">
+    Two dense layers with 784 → 500 → 10 units. Trained with PyTorch and exported to GGUF, or trained directly in ggml.
+  </Card>
+  <Card title="Convolutional (CNN)" icon="layer-group">
+    Two convolutional layers followed by a dense output layer. Trained with TensorFlow and exported to GGUF, or trained directly in ggml.
+  </Card>
+</CardGroup>
+
+### Model structure
+
+The `mnist_model` struct holds all weights and contexts for both architectures:
+
+```cpp
+struct mnist_model {
+    std::string arch;           // "mnist-fc" or "mnist-cnn"
+    ggml_backend_sched_t backend_sched;
+    std::vector<ggml_backend_t> backends;
+
+    // Fully connected weights
+    struct ggml_tensor * fc1_weight;   // (500, 784)
+    struct ggml_tensor * fc1_bias;     // (500,)
+    struct ggml_tensor * fc2_weight;   // (10, 500)
+    struct ggml_tensor * fc2_bias;     // (10,)
+
+    // CNN weights
+    struct ggml_tensor * conv1_kernel;
+    struct ggml_tensor * conv1_bias;
+    struct ggml_tensor * conv2_kernel;
+    struct ggml_tensor * conv2_bias;
+    struct ggml_tensor * dense_weight;
+    struct ggml_tensor * dense_bias;
+};
+```
+
+Key constants:
+
+```cpp
+#define MNIST_HW         28   // image side length in pixels
+#define MNIST_NINPUT    784   // 28 × 28 flattened
+#define MNIST_NCLASSES   10   // digits 0–9
+#define MNIST_NHIDDEN   500   // hidden units in FC network
+#define MNIST_CNN_NCB     8   // base channel count for CNN
+```
+
+## Getting the data
+
+The dataset is downloaded automatically when you run the Python training scripts. You can also download it manually from [HuggingFace](https://huggingface.co/datasets/ylecun/mnist).
+
+<Note>
+Downloads from the original Yann LeCun website are frequently throttled. Use HuggingFace instead.
+</Note>
+
+## Fully connected network
+
+### Train with PyTorch
+
+Train a fully connected model in PyTorch and save it as a GGUF file:
+
+```bash
+python3 mnist-train-fc.py mnist-fc-f32.gguf
+```
+
+Expected output:
+
+```
+Test loss: 0.066377+-0.010468, Test accuracy: 97.94+-0.14%
+
+Model tensors saved to mnist-fc-f32.gguf:
+fc1.weight       (500, 784)
+fc1.bias         (500,)
+fc2.weight       (10, 500)
+fc2.bias         (10,)
+```
+
+### Evaluate with ggml
+
+```bash
+../../build/bin/mnist-eval \
+    mnist-fc-f32.gguf \
+    data/MNIST/raw/t10k-images-idx3-ubyte \
+    data/MNIST/raw/t10k-labels-idx1-ubyte
+```
+
+The evaluator prints a random test image as ASCII art, the model's prediction for that image, and aggregate accuracy over the full test set:
+
+```
+main: loaded model in 109.44 ms
+mnist_model_eval: model evaluation on 10000 images took 76.92 ms, 7.69 us/image
+main: predicted digit is 3
+main: test_loss=0.066379+-0.009101
+main: test_acc=97.94+-0.14%
+```
+
+### Train with ggml
+
+You can also train the fully connected model directly in ggml:
+
+```bash
+../../build/bin/mnist-train \
+    mnist-fc \
+    mnist-fc-f32.gguf \
+    data/MNIST/raw/train-images-idx3-ubyte \
+    data/MNIST/raw/train-labels-idx1-ubyte
+```
+
+The resulting GGUF file can then be evaluated with `mnist-eval` as shown above.
+
+## Convolutional network
+
+### Train with TensorFlow
+
+```bash
+python3 mnist-train-cnn.py mnist-cnn-f32.gguf
+```
+
+Expected output:
+
+```
+Test loss: 0.047947
+Test accuracy: 98.46%
+GGUF model saved to 'mnist-cnn-f32.gguf'
+```
+
+### Evaluate with ggml
+
+```bash
+../../build/bin/mnist-eval \
+    mnist-cnn-f32.gguf \
+    data/MNIST/raw/t10k-images-idx3-ubyte \
+    data/MNIST/raw/t10k-labels-idx1-ubyte
+```
+
+```
+main: loaded model in 91.99 ms
+mnist_model_eval: model evaluation on 10000 images took 267.61 ms, 26.76 us/image
+main: predicted digit is 1
+main: test_loss=0.047955+-0.007029
+main: test_acc=98.46+-0.12%
+```
+
+### Train with ggml
+
+```bash
+../../build/bin/mnist-train \
+    mnist-cnn \
+    mnist-cnn-f32.gguf \
+    data/MNIST/raw/train-images-idx3-ubyte \
+    data/MNIST/raw/train-labels-idx1-ubyte
+```
+
+## Hardware acceleration
+
+Both `mnist-train` and `mnist-eval` are backend-agnostic. You can select a specific backend by appending its name:
+
+```bash
+../../build/bin/mnist-eval mnist-fc-f32.gguf \
+    data/MNIST/raw/t10k-images-idx3-ubyte \
+    data/MNIST/raw/t10k-labels-idx1-ubyte \
+    CUDA0
+```
+
+The model uses the named backend as primary and falls back to CPU for any operations the backend does not support.
+
+## Batch configuration
+
+Gradient accumulation is used during training via separate logical and physical batch sizes:
+
+```cpp
+#define MNIST_NBATCH_LOGICAL   1000  // datapoints per gradient update
+#define MNIST_NBATCH_PHYSICAL   500  // datapoints processed in parallel
+```
+
+The logical batch size controls gradient update frequency; the physical batch size controls parallelism and memory usage. Any multiple works as long as `MNIST_NBATCH_LOGICAL % MNIST_NBATCH_PHYSICAL == 0`.
+
+## Web demo
+
+The evaluation code can be compiled to WebAssembly using [Emscripten](https://emscripten.org/):
+
+```bash
+# Copy model and test data into examples/mnist (symlinks do not work)
+cp mnist-fc-f32.gguf examples/mnist/mnist-f32.gguf
+cp data/MNIST/raw/t10k-images-idx3-ubyte examples/mnist/
+
+# Build from the repo root
+mkdir -p build-em
+emcmake cmake .. -DGGML_BUILD_EXAMPLES=ON \
+    -DCMAKE_C_FLAGS="-pthread -matomics -mbulk-memory" \
+    -DCMAKE_CXX_FLAGS="-pthread -matomics -mbulk-memory"
+make mnist
+```
+
+Serve the output files with a local HTTP server:
+
+```bash
+python3 examples/mnist/server.py
+# Serving directory at http://localhost:8000
+```
+
+Open the link in your browser. Draw a digit on the canvas and the model predicts it, or click **Random** to pull an image from the test set.
+
+<Note>
+Neural networks are susceptible to distributional shift. Digits that look significantly different from the MNIST training data (e.g. not centred) may be misclassified.
+</Note>

@@ -14,18 +14,18 @@ ggml is a tensor library written in C that provides the computational foundation
 
 ## Key features
 
-<Columns cols={3}>
+<CardGroup cols={3}>
   <Card title="Zero dependencies" icon="circle-check">
     The core library has no third-party dependencies, making it straightforward
     to embed in any project.
   </Card>
   <Card title="Integer quantization" icon="microchip">
-    Supports integer quantization (e.g. 4-bit, 8-bit) to reduce memory usage
-    and accelerate inference on constrained hardware.
+    Supports integer quantization (Q2–Q8) to reduce memory usage and accelerate
+    inference on constrained hardware.
   </Card>
   <Card title="Automatic differentiation" icon="arrows-rotate">
-    Supports forward and backward passes for training, with ADAM and L-BFGS
-    optimizers built in.
+    Supports forward and backward passes for training, with AdamW and SGD
+    optimizers built in via `ggml-opt.h`.
   </Card>
   <Card title="Multi-backend" icon="server">
     Computation can be dispatched to CPU, CUDA, Metal, Vulkan, HIP, SYCL, and
@@ -39,7 +39,7 @@ ggml is a tensor library written in C that provides the computational foundation
     First-class support for the GGUF file format used to distribute quantized
     model weights.
   </Card>
-</Columns>
+</CardGroup>
 
 ## Architecture overview
 
@@ -63,6 +63,9 @@ modern path uses `ggml_backend_sched` to route operations across multiple
 devices automatically.
 
 ```c
+#include "ggml.h"
+#include "ggml-cpu.h"  // ggml_set_f32, ggml_get_f32_1d, ggml_graph_compute_with_ctx
+
 // 1. Allocate a context
 struct ggml_init_params params = {
     .mem_size   = 16*1024*1024,
@@ -79,7 +82,7 @@ struct ggml_tensor * result = ggml_add(ctx, a, b);
 struct ggml_cgraph * gf     = ggml_new_graph(ctx);
 ggml_build_forward_expand(gf, result);
 
-// 4. Compute
+// 4. Compute (ggml_set_f32/ggml_get_f32_1d are in ggml-cpu.h)
 ggml_set_f32(a, 1.0f);
 ggml_set_f32(b, 2.0f);
 ggml_graph_compute_with_ctx(ctx, gf, /*n_threads=*/1);

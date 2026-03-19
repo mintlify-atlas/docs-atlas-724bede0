@@ -27,8 +27,10 @@ Useful CMake options:
 | Option | Default | Description |
 |--------|---------|-------------|
 | `GGML_CUDA=ON` | OFF | Enable the CUDA backend |
-| `GGML_CUDA_F16=ON` | OFF | Use FP16 tensors in CUDA kernels |
+| `GGML_CUDA_FORCE_MMQ=ON` | OFF | Use mmq kernels instead of cuBLAS |
+| `GGML_CUDA_FORCE_CUBLAS=ON` | OFF | Always use cuBLAS instead of mmq kernels |
 | `GGML_CUDA_NO_PEER_COPY=ON` | OFF | Disable direct GPU-to-GPU peer copies |
+| `GGML_CUDA_FA=ON` | ON | Compile FlashAttention CUDA kernels |
 | `CMAKE_CUDA_ARCHITECTURES` | auto | Target GPU architectures, e.g. `"89;90"` |
 
 ## Initialization

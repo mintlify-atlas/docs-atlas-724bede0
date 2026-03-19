@@ -39,7 +39,7 @@ struct ggml_init_params params = {
 struct ggml_context * ctx = ggml_init(params);
 
 struct ggml_tensor * x = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
-ggml_set_param(ctx, x);  // x is the variable we differentiate with respect to
+ggml_set_param(x);  // x is the variable we differentiate with respect to
 
 struct ggml_tensor * a  = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
 struct ggml_tensor * b  = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
@@ -50,13 +50,16 @@ struct ggml_tensor * f  = ggml_add(ctx, ggml_mul(ctx, a, x2), b);
 ### Build forward and backward graphs
 
 ```c
-// Build the forward graph
+// Build the forward graph (grads=true is required for backward pass)
 struct ggml_cgraph * gf = ggml_new_graph_custom(ctx, GGML_DEFAULT_GRAPH_SIZE, /*grads=*/true);
 ggml_build_forward_expand(gf, f);
 
-// Allocate gradient accumulator tensors and attach backward nodes
-struct ggml_tensor * grad_f = NULL; // NULL means use a scalar 1.0 seed
-ggml_build_backward_expand(ctx, gf, &grad_f);
+// Allocate gradient accumulator tensors and attach backward nodes.
+// grad_accs is an array of ggml_tensor* with one entry per graph output node.
+// The ggml-opt.h high-level API manages grad_accs automatically.
+// For manual use, pass an array of NULL pointers (ggml allocates gradient tensors):
+struct ggml_tensor * grad_accs[1] = { NULL };
+ggml_build_backward_expand(ctx, gf, grad_accs);
 ```
 
 ### Set values and compute
@@ -92,7 +95,7 @@ void ggml_build_backward_expand(
 
 - `ctx` — the context used to allocate gradient tensors
 - `cgraph` — a forward graph previously built with `ggml_build_forward_expand`; must have been created with `grads = true`
-- `grad_accs` — pointer to an array of gradient accumulator tensors (one per output); pass a pointer to `NULL` to use a default scalar-1 seed
+- `grad_accs` — array of `ggml_tensor *` with one entry per output node in the forward graph; pass `NULL` entries to have ggml allocate gradient accumulator tensors automatically
 
 After this call, the graph contains both forward and backward nodes. Calling `ggml_graph_compute` will execute them in the correct order.
 

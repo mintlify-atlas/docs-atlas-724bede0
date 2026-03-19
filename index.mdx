@@ -67,6 +67,7 @@ ggml was built to enable efficient machine learning inference on consumer hardwa
     - Flash attention and other fused operations for transformer models
 
     ```c
+    // ggml.h + ggml-cpu.h
     struct ggml_init_params params = {
         .mem_size   = 256*1024*1024,
         .mem_buffer = NULL,
@@ -79,7 +80,7 @@ ggml was built to enable efficient machine learning inference on consumer hardwa
 
     struct ggml_cgraph * gf = ggml_new_graph(ctx);
     ggml_build_forward_expand(gf, c);
-    ggml_graph_compute_with_ctx(ctx, gf, /*n_threads=*/4);
+    ggml_graph_compute_with_ctx(ctx, gf, /*n_threads=*/4);  // from ggml-cpu.h
 
     ggml_free(ctx);
     ```
@@ -117,14 +118,14 @@ ggml was built to enable efficient machine learning inference on consumer hardwa
     - Hardware-accelerated dequantization on CUDA, Metal, and CPU with SIMD
 
     ```c
-    // Quantize a buffer of f32 weights to Q4_K_M
+    // Quantize a buffer of f32 weights to Q4_K
     size_t quantized_size = ggml_quantize_chunk(
         GGML_TYPE_Q4_K,     // target quantization type
         src_data,            // source f32 data
         dst_data,            // destination quantized buffer
-        0,                   // starting row
+        0,                   // starting row (start)
         nrows,               // number of rows
-        ncols,               // number of columns
+        n_per_row,           // elements per row
         /*imatrix=*/NULL     // importance matrix (optional)
     );
     ```

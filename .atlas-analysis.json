@@ -1,0 +1,129 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "ggml",
+  "projectDescription": "A low-level C tensor library for machine learning that powers inference of large language models with integer quantization, automatic differentiation, and broad hardware backend support.",
+  "theme": "aspen",
+  "primaryColor": "#fac518",
+  "lightColor": "#fcefd0",
+  "darkColor": "#414043",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "build"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/tensors",
+              "concepts/computation-graph",
+              "concepts/automatic-differentiation",
+              "concepts/quantization",
+              "concepts/memory-management"
+            ]
+          },
+          {
+            "group": "Backends",
+            "pages": [
+              "backends/overview",
+              "backends/cpu",
+              "backends/cuda",
+              "backends/metal",
+              "backends/vulkan",
+              "backends/rpc"
+            ]
+          },
+          {
+            "group": "Training",
+            "pages": [
+              "training/overview",
+              "training/optimizers",
+              "training/datasets"
+            ]
+          },
+          {
+            "group": "File Formats",
+            "pages": [
+              "formats/gguf"
+            ]
+          },
+          {
+            "group": "Examples",
+            "pages": [
+              "examples/simple",
+              "examples/mnist",
+              "examples/gpt2"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core API",
+            "pages": [
+              "api/context",
+              "api/tensors",
+              "api/operations",
+              "api/graph"
+            ]
+          },
+          {
+            "group": "Backend API",
+            "pages": [
+              "api/backend",
+              "api/allocator"
+            ]
+          },
+          {
+            "group": "Optimization API",
+            "pages": [
+              "api/optimizer"
+            ]
+          },
+          {
+            "group": "GGUF API",
+            "pages": [
+              "api/gguf"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Low-level cross-platform C tensor library with no third-party dependencies",
+    "Integer quantization support (Q4, Q5, Q8, and more) for efficient inference",
+    "Automatic differentiation via computation graph",
+    "ADAM and L-BFGS optimizers for model training",
+    "Zero memory allocations at runtime",
+    "Broad hardware backend support: CPU, CUDA, Metal, Vulkan, OpenCL, SYCL, WebGPU, RPC",
+    "GGUF binary file format for fast model loading and saving",
+    "Multi-threading support with configurable thread pools",
+    "SIMD optimizations (AVX, AVX2, AVX-512, ARM NEON)"
+  ],
+  "publicApiSurface": [
+    "ggml_init / ggml_free / ggml_reset",
+    "ggml_new_tensor_1d / ggml_new_tensor_2d / ggml_new_tensor_3d / ggml_new_tensor_4d",
+    "ggml_add / ggml_mul / ggml_mul_mat / ggml_sub / ggml_div",
+    "ggml_build_forward_expand / ggml_build_backward_expand",
+    "ggml_graph_compute / ggml_new_graph",
+    "ggml_backend_init / ggml_backend_free / ggml_backend_graph_compute",
+    "ggml_backend_sched_new / ggml_backend_sched_graph_compute",
+    "ggml_gallocr_new / ggml_gallocr_alloc_graph",
+    "ggml_opt_init / ggml_opt_fit / ggml_opt_epoch",
+    "gguf_init_from_file / gguf_write_to_file",
+    "ggml_quantize_chunk",
+    "ggml_flash_attn_ext",
+    "ggml_set_param",
+    "ggml_graph_compute_with_ctx"
+  ]
+}
